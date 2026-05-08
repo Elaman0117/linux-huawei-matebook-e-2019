@@ -1,0 +1,39 @@
+From: SDM845 Build Fix <noreply@github.com>
+Subject: [PATCH] pm_domain: Add missing GENPD_FLAG_NO_STAY_ON definition
+
+The rcar-sysc, rmobile-sysc, rockchip pm-domains, and tegra
+powergate-bpmp drivers reference GENPD_FLAG_NO_STAY_ON, but the
+definition was never added to include/linux/pm_domain.h.
+
+This causes build failures:
+  drivers/pmdomain/renesas/rcar-sysc.c:244: error: 'GENPD_FLAG_NO_STAY_ON' undeclared
+
+Add the missing flag definition as (1U << 10), the next available bit.
+
+Signed-off-by: CI Build Fix <noreply@github.com>
+---
+ include/linux/pm_domain.h | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/include/linux/pm_domain.h b/include/linux/pm_domain.h
+--- a/include/linux/pm_domain.h
++++ b/include/linux/pm_domain.h
+@@ -115,6 +115,10 @@
+  *				genpd provider specific way, likely through a
+  *				parent device node. This flag makes genpd to
+  *				skip its internal support for this.
++ *
++ * GENPD_FLAG_NO_STAY_ON:	Instructs genpd to not keep the PM domain
++ *				powered on during system suspend, allowing it
++ *				to be powered off when unused.
+  */
+ #define GENPD_FLAG_PM_CLK	 (1U << 0)
+ #define GENPD_FLAG_IRQ_SAFE	 (1U << 1)
+@@ -127,6 +131,7 @@
+ #define GENPD_FLAG_OPP_TABLE_FW	 (1U << 7)
+ #define GENPD_FLAG_DEV_NAME_FW	 (1U << 8)
+ #define GENPD_FLAG_NO_SYNC_STATE (1U << 9)
++#define GENPD_FLAG_NO_STAY_ON	 (1U << 10)
+
+ enum gpd_status {
+ 	GENPD_STATE_ON = 0,	/* PM domain is on */
