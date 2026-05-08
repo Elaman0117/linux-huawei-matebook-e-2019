@@ -1,0 +1,717 @@
+# ============================================================================
+# build-kernel.yml — Build Arch Linux ARM kernel package for
+#                    HUAWEI MateBook E 2019
+# ============================================================================
+# Design Rationale:
+#   - Runs on ubuntu-24.04-arm (native ARM64) — no cross-compilation
+#   - Builds kernel from SDM845 mainline sources at a specific STABLE tag
+#   - Applies New-Wheat patches for Huawei MateBook E 2019 support
+#   - Creates a proper Arch Linux ARM .pkg.tar.zst package
+#   - Handles patch failures gracefully (opens GitHub Issue)
+#   - Aggressive disk cleanup based on GeraldOnIT research:
+#     ARM64 runner: ~46GB free → ~55GB after cleanup (+9GB)
+#   - 6-hour timeout with progress reporting
+# ============================================================================
+
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      sdm845_tag:
+        description: 'SDM845 kernel stable tag (e.g. sdm845-6.18.2-r0)'
+        required: true
+        type: string
+      new_wheat_sha:
+        description: 'New-Wheat repository commit SHA'
+        required: true
+        type: string
+      sdm845_changed:
+        description: 'Whether SDM845 tag changed'
+        required: false
+        type: string
+        default: 'true'
+      new_wheat_changed:
+        description: 'Whether New-Wheat patches changed'
+        required: false
+        type: string
+        default: 'false'
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+env:
+  KERNEL_NAME: linux-huawei-matebook-e-2019
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+
+    steps:
+      # ================================================================
+      # Phase 0: Environment Preparation & Disk Cleanup
+      # ================================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h /
+          echo ""
+          echo "Architecture: $(uname -m)"
+
+          # ── Based on GeraldOnIT research ──
+          # ARM64 runner: ~27GB used, ~46GB free before cleanup
+          # After cleanup: ~18GB used, ~55GB free (+9GB reclaimed)
+          #
+          # Remove pre-installed software we don't need for kernel builds:
+
+          # JVM — ~890MB (x64) / smaller on ARM64
+          sudo rm -rf /usr/lib/jvm
+
+          # Haskell compiler installer — ~1.6GB
+          sudo rm -rf /usr/local/.ghcup
+
+          # Android SDK — ~8.5GB (x64) / ~3.1GB (arm64)
+          sudo rm -rf /usr/local/lib/android
+
+          # PowerShell — ~4.1GB (x64) / ~2.2GB (arm64)
+          sudo rm -rf /usr/local/share/powershell
+
+          # .NET runtimes and SDKs — ~1.6GB (x64) / ~1.7GB (arm64)
+          sudo rm -rf /usr/share/dotnet
+
+          # Swift runtime and SDK — ~690MB (x64) / ~605MB (arm64)
+          sudo rm -rf /usr/share/swift
+
+          # Pre-cached tools (Node, Python, Go, Ruby, .NET SDKs)
+          # This is $AGENT_TOOLSDIRECTORY — safe to remove for kernel builds
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
+          # Clean apt cache
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+
+          # Remove snap packages if present
+          sudo rm -rf /snap
+
+          echo ""
+          echo "=== Disk space after cleanup ==="
+          df -h /
+
+      - name: Parse version from tag
+        id: version
+        run: |
+          TAG="${{ inputs.sdm845_tag }}"
+          echo "Parsing version from tag: $TAG"
+
+          # Convert sdm845-X.Y.Z-rN -> Arch package version
+          # Stable tags: sdm845-6.18.2-r0 -> pkgver=6.18.2, pkgrel=1
+          PKGVER=$(echo "$TAG" | python3 -c "
+          import sys, re
+          tag = sys.stdin.read().strip()
+          # Remove sdm845- prefix
+          ver = tag.replace('sdm845-', '')
+          # Remove -rN revision (will become pkgrel)
+          m = re.match(r'(.+?)-r(\d+)$', ver)
+          if m:
+              pkgver = m.group(1)
+              pkgrel = int(m.group(2)) + 1  # pkgrel starts at 1
+          else:
+              pkgver = ver
+              pkgrel = 1
+          print(f'{pkgver}|{pkgrel}')
+          ")
+
+          PKGVER_VAL=$(echo "$PKGVER" | cut -d'|' -f1)
+          PKGREL_VAL=$(echo "$PKGVER" | cut -d'|' -f2)
+
+          echo "pkgver=$PKGVER_VAL" >> "$GITHUB_OUTPUT"
+          echo "pkgrel=$PKGREL_VAL" >> "$GITHUB_OUTPUT"
+          echo "Package version: $PKGVER_VAL-$PKGREL_VAL"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libelf-dev \
+            libssl-dev \
+            libncurses-dev \
+            cpio \
+            rsync \
+            kmod \
+            zstd \
+            libarchive-dev \
+            xz-utils \
+            python3 \
+            curl \
+            git \
+            uboot-tools \
+            device-tree-compiler
+
+      # ================================================================
+      # Phase 1: Source Acquisition
+      # ================================================================
+      - name: Clone SDM845 kernel
+        run: |
+          TAG="${{ inputs.sdm845_tag }}"
+          echo "Cloning SDM845 kernel at tag: $TAG"
+
+          # Shallow clone at the specific tag to save disk space and time
+          git clone --depth 1 --branch "$TAG" \
+            https://gitlab.com/sdm845-mainline/linux.git \
+            linux-src
+
+          echo "Kernel source size:"
+          du -sh linux-src
+
+      - name: Clone New-Wheat patches
+        run: |
+          SHA="${{ inputs.new_wheat_sha }}"
+          echo "Cloning New-Wheat patches at SHA: ${SHA::12}"
+
+          git clone --depth 1 \
+            https://github.com/New-Wheat/Linux-for-HUAWEI-MateBook-E-2019.git \
+            new-wheat
+
+          cd new-wheat
+          ACTUAL_SHA=$(git rev-parse HEAD)
+          echo "Cloned at: ${ACTUAL_SHA::12}"
+          cd ..
+
+          echo "Patch directory contents:"
+          ls -la new-wheat/patches/
+
+      # ================================================================
+      # Phase 2: Patch Application
+      # ================================================================
+      - name: Apply New-Wheat patches
+        id: patches
+        run: |
+          cd linux-src
+
+          # Define patch order (order matters!)
+          # 1. UCSI callback fix (dependency for EC driver)
+          # 2. Device tree (defines hardware layout)
+          # 3. EC driver (depends on device tree + UCSI)
+          # 4. QSEECOM (depends on EC driver)
+          # 5. Camera sensors (standalone)
+          PATCHES=(
+            "2-8-usb-typec-ucsi-add-recipient-arg-to-update_altmodes-callback.patch"
+            "huawei_planck_devicetree.patch"
+            "huawei_planck_ec.patch"
+            "huawei_planck_qseecom.patch"
+            "camera_sensors_and_actuator.patch"
+          )
+
+          PATCH_DIR="../new-wheat/patches"
+          FAILED_PATCHES=""
+          APPLIED_COUNT=0
+
+          for patch_file in "${PATCHES[@]}"; do
+            echo ""
+            echo "=========================================="
+            echo "Applying: $patch_file"
+            echo "=========================================="
+
+            if [ ! -f "$PATCH_DIR/$patch_file" ]; then
+              echo "ERROR: Patch file not found: $PATCH_DIR/$patch_file"
+              FAILED_PATCHES="$FAILED_PATCHES $patch_file (not found)"
+              continue
+            fi
+
+            # Try git am first (preserves commit info for git-format patches)
+            if git am --whitespace=nowarn "$PATCH_DIR/$patch_file" 2>/dev/null; then
+              echo "Applied via git am"
+              APPLIED_COUNT=$((APPLIED_COUNT + 1))
+            else
+              git am --abort 2>/dev/null || true
+
+              # Fallback: plain patch
+              if patch -p1 --no-backup-if-mismatch -i "$PATCH_DIR/$patch_file" --dry-run 2>&1; then
+                patch -p1 --no-backup-if-mismatch -i "$PATCH_DIR/$patch_file"
+                echo "Applied via patch -p1"
+                APPLIED_COUNT=$((APPLIED_COUNT + 1))
+              else
+                echo "FAILED: Could not apply $patch_file"
+                FAILED_PATCHES="$FAILED_PATCHES $patch_file (apply failed)"
+              fi
+            fi
+          done
+
+          echo ""
+          echo "=========================================="
+          echo "Patch Summary"
+          echo "=========================================="
+          echo "Applied: $APPLIED_COUNT / ${#PATCHES[@]}"
+
+          if [ -n "$FAILED_PATCHES" ]; then
+            echo "Failed patches:$FAILED_PATCHES"
+            echo "patches_failed=true" >> "$GITHUB_OUTPUT"
+            echo "failed_list=$FAILED_PATCHES" >> "$GITHUB_OUTPUT"
+          else
+            echo "All patches applied successfully!"
+            echo "patches_failed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create issue for failed patches
+        if: steps.patches.outputs.patches_failed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const failedList = '${{ steps.patches.outputs.failed_list }}';
+            const tag = '${{ inputs.sdm845_tag }}';
+            const sha = '${{ inputs.new_wheat_sha }}'.substring(0, 12);
+
+            const body = `## Patch Application Failure
+
+            The following patches failed to apply when building kernel **${tag}** with New-Wheat commit \`${sha}\`:
+
+            ${failedList.split(' ').filter(s => s.trim()).map(p => `- ${p}`).join('\n')}
+
+            ### Possible causes
+            - The SDM845 kernel has been updated and the patches are no longer compatible
+            - The New-Wheat patches need to be rebased onto the new kernel version
+
+            ### Actions needed
+            1. Check if New-Wheat repository has updated patches
+            2. If not, the patches need to be manually rebased
+            3. Once patches are fixed, trigger a rebuild
+
+            Build run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}
+            `;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Patches failed to apply for ${tag}`,
+              body: body,
+              labels: ['patches-failed', 'bug']
+            });
+
+      - name: Fail on patch failure
+        if: steps.patches.outputs.patches_failed == 'true'
+        run: |
+          echo "Build aborted: patches failed to apply."
+          echo "A GitHub Issue has been created with details."
+          exit 1
+
+      # ================================================================
+      # Phase 3: Kernel Configuration
+      # ================================================================
+      - name: Generate kernel config
+        run: |
+          cd linux-src
+
+          echo "Generating kernel configuration..."
+
+          # Use qcom_defconfig as base (available in SDM845 kernel)
+          if [ -f "arch/arm64/configs/qcom_defconfig" ]; then
+            echo "Using qcom_defconfig as base"
+            make ARCH=arm64 qcom_defconfig
+          elif [ -f "arch/arm64/configs/defconfig" ]; then
+            echo "Using defconfig as base"
+            make ARCH=arm64 defconfig
+          else
+            echo "ERROR: No defconfig found"
+            exit 1
+          fi
+
+          # Apply custom config fragment for MateBook E 2019
+          cat >> .config << 'CONFIG_FRAG'
+          # HUAWEI MateBook E 2019 (SDM850) specific options
+
+          # Qualcomm SDM845/SDM850 platform
+          CONFIG_ARCH_QCOM=y
+          CONFIG_SOC_QCOM=y
+
+          # Type-C / USB PD (needed for UCSI, charging)
+          CONFIG_TYPEC=y
+          CONFIG_TYPEC_UCSI=y
+          CONFIG_UCSI_ACK_ECI=y
+
+          # Huawei Planck EC driver
+          CONFIG_HUAWEI_PLANCK_EC=y
+
+          # QSEECOM (needed for sensors via hexagonrpcd)
+          CONFIG_QCOM_QSEECOM=y
+          CONFIG_QCOM_QSEECOM_UEFI=y
+
+          # Keyboard / Touchpad (HID over I2C)
+          CONFIG_HID=y
+          CONFIG_HID_MULTITOUCH=y
+          CONFIG_I2C_HID=y
+          CONFIG_I2C_HID_OF=y
+
+          # Touchscreen
+          CONFIG_INPUT_TOUCHSCREEN=y
+          CONFIG_TOUCHSCREEN_GOODIX=y
+
+          # WiFi (ath10k on SDM845)
+          CONFIG_ATH10K=y
+          CONFIG_ATH10K_PCI=y
+          CONFIG_ATH10K_SNOC=y
+
+          # Bluetooth
+          CONFIG_BT=y
+          CONFIG_BT_HCIUART=y
+          CONFIG_BT_HCIUART_QCA=y
+
+          # GPU (freedreno / msm)
+          CONFIG_DRM_MSM=y
+          CONFIG_DRM_PANEL_EDP=y
+
+          # Audio (qcom/sdm845)
+          CONFIG_SND_SOC=y
+          CONFIG_SND_SOC_QCOM=y
+          CONFIG_SND_SOC_SDM845=y
+
+          # UFS storage
+          CONFIG_SCSI_UFS_QCOM=y
+
+          # Display panels
+          CONFIG_DRM_PANEL=y
+
+          # Camera (from New-Wheat patches)
+          CONFIG_MEDIA_SUPPORT=y
+          CONFIG_MEDIA_CAMERA_SUPPORT=y
+          CONFIG_V4L_PLATFORM_DRIVERS=y
+          CONFIG_VIDEO_QCOM_CAMSS=y
+
+          # Battery / Power
+          CONFIG_CHARGER_QCOM_SMBB=y
+          CONFIG_POWER_SUPPLY=y
+          CONFIG_BATTERY_QCOM_BATTMGR=y
+
+          # Firmware loader
+          CONFIG_FW_LOADER=y
+          CONFIG_EXTRA_FIRMWARE_DIR="/lib/firmware"
+
+          # initramfs / initrd support
+          CONFIG_BLK_DEV_INITRD=y
+
+          # Module signing (allow unsigned modules for now)
+          CONFIG_MODULE_SIG=y
+          CONFIG_MODULE_SIG_ALL=n
+          CONFIG_MODULE_SIG_FORCE=n
+          CONFIG_MODULE_SIG_HASH="sha256"
+
+          # Module support
+          CONFIG_MODULES=y
+          CONFIG_MODULE_UNLOAD=y
+          CONFIG_MODVERSIONS=y
+          CONFIG_FRAG
+
+          # Resolve all config dependencies
+          make ARCH=arm64 olddefconfig
+
+          # Verify critical options are set
+          echo ""
+          echo "=== Critical config verification ==="
+          for opt in CONFIG_ARCH_QCOM CONFIG_DRM_MSM CONFIG_TYPEC_UCSI \
+                     CONFIG_SCSI_UFS_QCOM CONFIG_ATH10K CONFIG_BT_HCIUART_QCA; do
+            val=$(grep "^${opt}=" .config 2>/dev/null || echo "NOT SET")
+            echo "  $opt = $val"
+          done
+
+      # ================================================================
+      # Phase 4: Kernel Build
+      # ================================================================
+      - name: Build kernel
+        run: |
+          cd linux-src
+
+          echo "Starting kernel build at $(date)"
+          echo "Build concurrency: $(nproc) jobs"
+          echo "Disk space:"
+          df -h / .
+
+          # Build the kernel image, modules, and device tree blobs
+          make ARCH=arm64 \
+            -j$(nproc) \
+            LOCALVERSION="-huawei-matebook-e-2019" \
+            Image.gz \
+            modules \
+            qcom/sdm850-huawei-matebook-e-2019.dtb
+
+          echo "Kernel build completed at $(date)"
+
+          # Verify outputs
+          echo ""
+          echo "=== Build outputs ==="
+          ls -lh arch/arm64/boot/Image.gz
+          ls -lh arch/arm64/boot/dts/qcom/sdm850-huawei-matebook-e-2019.dtb 2>/dev/null || \
+            echo "Warning: DTB not found at expected path, searching..."
+            find arch/arm64/boot/dts -name "*matebook*" -o -name "*planck*" 2>/dev/null | head -5
+
+      - name: Install kernel to staging directory
+        run: |
+          cd linux-src
+
+          STAGING="/tmp/kernel-staging"
+          mkdir -p "$STAGING"
+
+          # Install modules (stripped)
+          make ARCH=arm64 \
+            INSTALL_MOD_PATH="$STAGING" \
+            INSTALL_MOD_STRIP=1 \
+            modules_install
+
+          # Get kernel version string
+          KVER=$(make ARCH=arm64 kernelrelease)
+          echo "Kernel version: $KVER"
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+
+          # Install kernel image
+          mkdir -p "$STAGING/boot"
+          cp arch/arm64/boot/Image.gz "$STAGING/boot/vmlinuz-$KVER"
+
+          # Install device tree blob
+          mkdir -p "$STAGING/boot/dtbs/$KVER/qcom"
+          DTB_PATH="arch/arm64/boot/dts/qcom/sdm850-huawei-matebook-e-2019.dtb"
+          if [ -f "$DTB_PATH" ]; then
+            cp "$DTB_PATH" "$STAGING/boot/dtbs/$KVER/qcom/"
+          else
+            echo "Warning: DTB not found at $DTB_PATH"
+            find arch/arm64/boot/dts -name "*matebook*" -o -name "*planck*" 2>/dev/null | while read dtb; do
+              cp "$dtb" "$STAGING/boot/dtbs/$KVER/qcom/"
+            done
+          fi
+
+          echo ""
+          echo "=== Staging directory size ==="
+          du -sh "$STAGING"
+          du -sh "$STAGING/boot"
+          du -sh "$STAGING/lib/modules"
+
+      # ================================================================
+      # Phase 5: Free disk space before packaging
+      # ================================================================
+      - name: Free disk space before packaging
+        run: |
+          # Remove kernel source tree and object files to free disk
+          # We only need the staging directory now
+          rm -rf linux-src
+          rm -rf new-wheat
+
+          echo "Disk space after removing source trees:"
+          df -h /
+
+      # ================================================================
+      # Phase 6: Arch Linux Package Creation
+      # ================================================================
+      - name: Create Arch Linux package
+        id: package
+        run: |
+          STAGING="/tmp/kernel-staging"
+          PKGDIR="/tmp/pkg-build"
+          KVER="$KVER"
+          PKGVER="${{ steps.version.outputs.pkgver }}"
+          PKGREL="${{ steps.version.outputs.pkgrel }}"
+          PKGNAME="$KERNEL_NAME"
+
+          echo "Creating Arch package: $PKGNAME $PKGVER-$PKGREL"
+
+          # Prepare package directory
+          mkdir -p "$PKGDIR/pkg"
+          cp -a "$STAGING/." "$PKGDIR/pkg/"
+
+          # Create /boot/vmlinuz-linux-huawei-matebook-e-2019 symlink
+          if [ -f "$PKGDIR/pkg/boot/vmlinuz-$KVER" ]; then
+            ln -sf "vmlinuz-$KVER" "$PKGDIR/pkg/boot/vmlinuz-$PKGNAME"
+          fi
+
+          # Create mkinitcpio preset
+          mkdir -p "$PKGDIR/pkg/etc/mkinitcpio.d"
+          cat > "$PKGDIR/pkg/etc/mkinitcpio.d/$PKGNAME.preset" << PRESET
+          # mkinitcpio preset file for '$PKGNAME'
+
+          ALL_config="/etc/mkinitcpio.conf"
+          ALL_kver="$KVER"
+
+          PRESETS=('default' 'fallback')
+
+          default_image="/boot/initramfs-$PKGNAME.img"
+          default_options="-S autodetect"
+
+          fallback_image="/boot/initramfs-$PKGNAME-fallback.img"
+          fallback_options="-S autodetect"
+          PRESET
+
+          # Create .INSTALL script
+          cat > "$PKGDIR/pkg/.INSTALL" << INSTALL
+          post_install() {
+            echo "Updating initramfs for $PKGNAME..."
+            if command -v mkinitcpio &>/dev/null; then
+              mkinitcpio -p $PKGNAME
+            fi
+
+            echo ""
+            echo "=== $PKGNAME installed ==="
+            echo "Kernel: $KVER"
+            echo ""
+            echo "IMPORTANT: Update your bootloader configuration."
+            echo "  vmlinuz:  /boot/vmlinuz-$PKGNAME"
+            echo "  initramfs: /boot/initramfs-$PKGNAME.img"
+            echo "  dtb:      /boot/dtbs/$KVER/qcom/sdm850-huawei-matebook-e-2019.dtb"
+          }
+
+          post_upgrade() {
+            post_install
+          }
+
+          pre_remove() {
+            rm -f /boot/initramfs-$PKGNAME.img
+            rm -f /boot/initramfs-$PKGNAME-fallback.img
+          }
+          INSTALL
+
+          # Create .PKGINFO metadata
+          cat > "$PKGDIR/pkg/.PKGINFO" << PKGINFO
+          # Generated by GitHub Actions CI
+          pkgname = $PKGNAME
+          pkgver = $PKGVER-$PKGREL
+          pkgdesc = Linux kernel for HUAWEI MateBook E 2019 (SDM850/SDM845) based on SDM845 mainline
+          url = https://github.com/${{ github.repository }}
+          builddate = $(date +%s)
+          packager = GitHub Actions CI <noreply@github.com>
+          size = $(du -sb "$PKGDIR/pkg" | cut -f1)
+          arch = aarch64
+          license = GPL-2.0-only
+          depends = coreutils kmod initramfs
+          optdepends = uboot-tools: for U-Boot bootloader
+          provides = linux=$PKGVER
+          conflicts = linux-aarch64
+          backup = etc/mkinitcpio.d/$PKGNAME.preset
+          PKGINFO
+
+          # Create .BUILDINFO
+          cat > "$PKGDIR/pkg/.BUILDINFO" << BUILDINFO
+          # Generated by GitHub Actions CI
+          format = 2
+          pkgname = $PKGNAME
+          pkgbase = $PKGNAME
+          pkgver = $PKGVER-$PKGREL
+          pkgarch = aarch64
+          pkgbuild_sha256sum = unknown
+          packager = GitHub Actions CI <noreply@github.com>
+          builddate = $(date +%s)
+          builddir = /home/runner/work/kernel-build/linux-src
+          buildenv = ci
+          options = !strip
+          buildtool = make
+          BUILDINFO
+
+          # Generate .MTREE
+          cd "$PKGDIR/pkg"
+          bsdtar -czf .MTREE --format=mtree \
+            --options='!all,use-set,type,uid,gid,mode,time,size,md5,sha256' \
+            . 2>/dev/null || {
+            find . -type f | sort | while read f; do
+              mode=$(stat -c '%a' "$f" 2>/dev/null || echo '644')
+              size=$(stat -c '%s' "$f" 2>/dev/null || echo '0')
+              md5=$(md5sum "$f" | cut -d' ' -f1)
+              echo "./${f#./} $mode size=$size md5digest=$md5"
+            done | gzip > .MTREE
+          }
+
+          # Create the .pkg.tar.zst package
+          cd "$PKGDIR"
+          PACKAGE_FILE="${PKGNAME}-${PKGVER}-${PKGREL}-aarch64.pkg.tar.zst"
+          bsdtar -cf - -C pkg . | zstd -T0 -18 -o "$PACKAGE_FILE"
+
+          echo "package_file=$PACKAGE_FILE" >> "$GITHUB_OUTPUT"
+          echo ""
+          echo "=== Package created ==="
+          ls -lh "$PACKAGE_FILE"
+
+          # Move to a known location
+          mv "$PACKAGE_FILE" "/tmp/$PACKAGE_FILE"
+
+      # ================================================================
+      # Phase 7: Cleanup
+      # ================================================================
+      - name: Cleanup build artifacts
+        run: |
+          rm -rf /tmp/kernel-staging
+          rm -rf /tmp/pkg-build
+
+          echo "Disk space after cleanup:"
+          df -h /
+
+      # ================================================================
+      # Phase 8: Upload & Release
+      # ================================================================
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.KERNEL_NAME }}-${{ steps.version.outputs.pkgver }}-${{ steps.version.outputs.pkgrel }}-aarch64
+          path: /tmp/${{ steps.package.outputs.package_file }}
+          retention-days: 90
+          compression-level: 0
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.pkgver }}-${{ steps.version.outputs.pkgrel }}
+          name: "Linux ${{ steps.version.outputs.pkgver }}-${{ steps.version.outputs.pkgrel }} for HUAWEI MateBook E 2019"
+          body: |
+            ## Linux Kernel for HUAWEI MateBook E 2019
+
+            **Version:** ${{ steps.version.outputs.pkgver }}-${{ steps.version.outputs.pkgrel }}
+            **SDM845 Tag:** ${{ inputs.sdm845_tag }}
+            **New-Wheat SHA:** ${{ inputs.new_wheat_sha }}
+
+            ### Installation
+
+            ```bash
+            # Copy the package to your Arch Linux ARM device
+            scp *.pkg.tar.zst root@device:/tmp/
+
+            # Install the package
+            pacman -U /tmp/linux-huawei-matebook-e-2019-*.pkg.tar.zst
+
+            # Update bootloader configuration
+            # GRUB example:
+            grub-mkconfig -o /boot/grub/grub.cfg
+            ```
+
+            ### Required firmware
+            Some hardware requires firmware files from `linux-firmware`:
+            ```bash
+            pacman -S linux-firmware
+            ```
+
+            For sensors (accelerometer, ambient light), install from AUR:
+            - `libssc`
+            - `hexagonrpcd`
+
+            ### Changes in this release
+            ${{ inputs.sdm845_changed == 'true' && '- SDM845 kernel updated' || '' }}
+            ${{ inputs.new_wheat_changed == 'true' && '- New-Wheat patches updated' || '' }}
+
+            ---
+            *Built by GitHub Actions from commit [${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})*
+          files: |
+            /tmp/${{ steps.package.outputs.package_file }}
+          draft: false
+          prerelease: false
+
+      - name: Build Summary
+        run: |
+          echo "## Build Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Package | ${{ env.KERNEL_NAME }}-${{ steps.version.outputs.pkgver }}-${{ steps.version.outputs.pkgrel }}-aarch64.pkg.tar.zst |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Kernel Version | ${{ env.KVER }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SDM845 Tag | ${{ inputs.sdm845_tag }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| New-Wheat SHA | ${{ inputs.new_wheat_sha }} |" >> "$GITHUB_STEP_SUMMARY"
