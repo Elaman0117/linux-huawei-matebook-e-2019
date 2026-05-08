@@ -1,0 +1,17 @@
+# mkinitcpio preset file for linux-huawei-matebook-e-2019
+# ============================================================================
+# Placeholders are replaced during package installation:
+#   %PKGBASE% -> linux-huawei-matebook-e-2019
+#   %KERNVER% -> full kernel version string
+# ============================================================================
+
+#ALL_config="/etc/mkinitcpio.conf"
+ALL_kver="%KERNVER%"
+
+PRESETS=('default' 'fallback')
+
+default_image="/boot/initramfs-%PKGBASE%.img"
+default_options="-S autodetect"
+
+fallback_image="/boot/initramfs-%PKGBASE%-fallback.img"
+fallback_options="-S autodetect"
