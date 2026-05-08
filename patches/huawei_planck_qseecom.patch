@@ -18,20 +18,10 @@ and other SDM845 devices by:
 Key changes for Huawei Planck:
 - Added "huawei,planck" with QCOM_QSEECOM_QUIRK_RO_UEFIVARS quirk
 - Added "qcom,sdm845" with QCOM_QSEECOM_QUIRK_DISABLE quirk
-  (SDM845 generic boards should not enable QSEECOM by default;
-   only specific machines like planck opt in via RO_UEFIVARS)
 - Added qcom_scm.qseecom module parameter: force|roefivars|off|auto
 
 Signed-off-by: Rebased for sdm845-6.18.2-r0
 ---
- arch/arm64/boot/dts/qcom/pm8998.dtsi           |  2 +-
- drivers/firmware/efi/vars.c                     |  2 ++
- drivers/firmware/qcom/qcom_qseecom.c            |  6 +++-
- drivers/firmware/qcom/qcom_qseecom_uefisecapp.c | 20 +++++++-
- drivers/firmware/qcom/qcom_scm.c                | 56 +++++++++++++-----------
- include/linux/firmware/qcom/qcom_qseecom.h      |  5 ++
- 6 files changed, 63 insertions(+), 28 deletions(-)
-
 diff --git a/arch/arm64/boot/dts/qcom/pm8998.dtsi b/arch/arm64/boot/dts/qcom/pm8998.dtsi
 index 3ecb33059..50b41942b 100644
 --- a/arch/arm64/boot/dts/qcom/pm8998.dtsi
@@ -59,7 +49,7 @@ index 3700e9869..11c5f785c 100644
  	return setvar(name, vendor, attr, data_size, data);
  }
 diff --git a/drivers/firmware/qcom/qcom_qseecom.c b/drivers/firmware/qcom/qcom_qseecom.c
-index 731e6d571..d3220f743 100644
+index 731e6d571..bedfa0d95 100644
 --- a/drivers/firmware/qcom/qcom_qseecom.c
 +++ b/drivers/firmware/qcom/qcom_qseecom.c
 @@ -36,6 +36,7 @@ static void qseecom_client_remove(void *data)
@@ -89,13 +79,13 @@ index 731e6d571..d3220f743 100644
  	/* Set up client devices for each base application */
  	for (i = 0; i < ARRAY_SIZE(qcom_qseecom_apps); i++) {
 -		ret = qseecom_client_register(qseecom_dev, &qcom_qseecom_apps[i]);
-+		qseecom_client_register(qseecom_dev, data,
++		ret = qseecom_client_register(qseecom_dev, data,
 +						     &qcom_qseecom_apps[i]);
  		if (ret)
  			return ret;
  	}
 diff --git a/drivers/firmware/qcom/qcom_qseecom_uefisecapp.c b/drivers/firmware/qcom/qcom_qseecom_uefisecapp.c
-index 98a463e97..36479907c 100644
+index 98a463e97..05f700dcb 100644
 --- a/drivers/firmware/qcom/qcom_qseecom_uefisecapp.c
 +++ b/drivers/firmware/qcom/qcom_qseecom_uefisecapp.c
 @@ -792,6 +792,12 @@ static efi_status_t qcuefi_query_variable_info(u32 attr, u64 *storage_space, u64
@@ -111,19 +101,17 @@ index 98a463e97..36479907c 100644
  static const struct efivar_operations qcom_efivar_ops = {
  	.get_variable = qcuefi_get_variable,
  	.set_variable = qcuefi_set_variable,
-@@ -804,9 +810,9 @@ static const struct efivar_operations qcom_efivar_ops = {
+@@ -804,7 +810,9 @@ static const struct efivar_operations qcom_efivar_ops = {
  static int qcom_uefisecapp_probe(struct auxiliary_device *aux_dev,
  				 const struct auxiliary_device_id *aux_dev_id)
  {
 +	unsigned long *quirks = aux_dev->dev.platform_data;
  	struct qcom_tzmem_pool_config pool_config;
--	struct qcuefi_client *qcuefi;
--	int status;
 +	const struct efivar_operations *ops;
+ 	struct qcuefi_client *qcuefi;
+ 	int status;
  
- 	qcuefi = devm_kzalloc(&aux_dev->dev, sizeof(*qcuefi), GFP_KERNEL);
- 	if (!qcuefi)
-@@ -829,7 +835,15 @@ static int qcom_uefisecapp_probe(struct auxiliary_device *aux_dev,
+@@ -829,7 +837,15 @@ static int qcom_uefisecapp_probe(struct auxiliary_device *aux_dev,
  	if (status)
  		return status;
  
@@ -141,7 +129,7 @@ index 98a463e97..36479907c 100644
  		qcuefi_set_reference(NULL);
  
 diff --git a/drivers/firmware/qcom/qcom_scm.c b/drivers/firmware/qcom/qcom_scm.c
-index e777b7cb9..6cac43d8b 100644
+index e777b7cb9..19a8f67ad 100644
 --- a/drivers/firmware/qcom/qcom_scm.c
 +++ b/drivers/firmware/qcom/qcom_scm.c
 @@ -13,6 +13,7 @@
@@ -152,11 +140,10 @@ index e777b7cb9..6cac43d8b 100644
  #include <linux/firmware/qcom/qcom_scm.h>
  #include <linux/firmware/qcom/qcom_tzmem.h>
  #include <linux/init.h>
-@@ -1986,42 +1987,54 @@ int qcom_scm_qseecom_app_send(u32 app_id, void *req, size_t req_size,
+@@ -1986,42 +1987,53 @@ int qcom_scm_qseecom_app_send(u32 app_id, void *req, size_t req_size,
  }
  EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_send);
  
-+/*
 +static unsigned long qcom_qseecom_disable = QCOM_QSEECOM_QUIRK_DISABLE;
 +static unsigned long qcom_qseecom_ro_uefi = QCOM_QSEECOM_QUIRK_RO_UEFIVARS;
 +
@@ -234,7 +221,7 @@ index e777b7cb9..6cac43d8b 100644
  
  	np = of_find_node_by_path("/");
  	if (!np)
-@@ -2030,7 +2043,22 @@ static bool qcom_scm_qseecom_machine_is_allowed(void)
+@@ -2030,7 +2042,22 @@ static bool qcom_scm_qseecom_machine_is_allowed(void)
  	match = of_match_node(qcom_scm_qseecom_allowlist, np);
  	of_node_put(np);
  
@@ -258,7 +245,7 @@ index e777b7cb9..6cac43d8b 100644
  }
  
  static void qcom_scm_qseecom_free(void *data)
-@@ -2044,6 +2072,7 @@ static void qcom_scm_qseecom_free(void *data)
+@@ -2044,6 +2071,7 @@ static void qcom_scm_qseecom_free(void *data)
  static int qcom_scm_qseecom_init(struct qcom_scm *scm)
  {
  	struct platform_device *qseecom_dev;
@@ -266,7 +253,7 @@ index e777b7cb9..6cac43d8b 100644
  	u32 version;
  	int ret;
  
-@@ -2064,30 +2093,21 @@ static int qcom_scm_qseecom_init(struct qcom_scm *scm)
+@@ -2064,26 +2092,18 @@ static int qcom_scm_qseecom_init(struct qcom_scm *scm)
  
  	dev_info(scm->dev, "qseecom: found qseecom with version 0x%x\n", version);
  
@@ -299,10 +286,6 @@ index e777b7cb9..6cac43d8b 100644
  
  	return devm_add_action_or_reset(scm->dev, qcom_scm_qseecom_free, qseecom_dev);
  }
--
- #else /* CONFIG_QCOM_QSEECOM */
- 
- static int qcom_scm_qseecom_init(struct qcom_scm *scm)
 diff --git a/include/linux/firmware/qcom/qcom_qseecom.h b/include/linux/firmware/qcom/qcom_qseecom.h
 index 3387897bf..c8c2f89d9 100644
 --- a/include/linux/firmware/qcom/qcom_qseecom.h
