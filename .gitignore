@@ -1,14 +1,61 @@
-*.tar
-*.tar.*
-*.jar
-*.exe
-*.msi
-*.deb
-*.zip
-*.tgz
-*.log
-*.log.*
-*.sig
+# ============================================================================
+# .gitignore for linux-huawei-matebook-e-2019
+# ============================================================================
+# This project is a CI/CD pipeline for building Arch Linux ARM kernel packages.
+# It does NOT store kernel source code — only build configuration and scripts.
+# ============================================================================
 
+# ---- Arch Linux Package Build Artifacts ----
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.pkg.tar.gz
+*.pkg.tar
+*.src.tar.zst
+*.log
+*.pkg
+
+# ---- Kernel Build Outputs (never committed) ----
+linux-src/
+vmlinuz*
+initramfs*
+System.map*
+.config.old
+Module.markers
+Module.symvers
+modules.builtin
+modules.builtin.modinfo
+modules.order
+
+# ---- Patch Artifacts ----
+*.orig
+*.rej
+*.patch~
+
+# ---- Upstream State Cache ----
+.upstream-cache/
+
+# ---- Editor / IDE Files ----
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.sublime-*
+
+# ---- macOS ----
+.DS_Store
+._*
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+
+# ---- Shell ----
+*.sh.bak
+
+# ---- Temporary / Staging ----
+tmp/
+staging/
 pkg/
 src/
