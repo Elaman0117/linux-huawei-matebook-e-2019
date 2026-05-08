@@ -277,23 +277,23 @@ jobs:
 
           # ── Patch 4: QSEECOM ──
           # Use the LOCAL rebased patch from this repo's patches/ directory.
-          # The upstream New-Wheat version may not be compatible with the
-          # current SDM845 kernel version. The local patch is rebased for
-          # each supported SDM845 stable tag.
+          # The original New-Wheat patch doesn't apply cleanly to sdm845-6.18.2-r0
+          # because the upstream QSEECOM allowlist and SCM init code have changed.
+          # The rebased patch accounts for these upstream changes.
           echo ""
           echo "=========================================="
-          echo "Applying: huawei_planck_qseecom.patch"
+          echo "Applying: huawei_planck_qseecom.patch (local rebased)"
           echo "=========================================="
-          LOCAL_PATCH_DIR="../patches"
-          # Prefer local rebased patch if it exists, otherwise fall back to upstream
-          if [ -f "$LOCAL_PATCH_DIR/huawei_planck_qseecom.patch" ]; then
-            echo "Using LOCAL rebased patch from $LOCAL_PATCH_DIR"
-            QSEECOM_PATCH="$LOCAL_PATCH_DIR/huawei_planck_qseecom.patch"
-          else
-            echo "Local rebased patch not found, using upstream New-Wheat version"
+          LOCAL_PATCHES_DIR="../patches"
+          QSEECOM_PATCH="$LOCAL_PATCHES_DIR/huawei_planck_qseecom.patch"
+          QSEECOM_APPLIED=false
+
+          # Verify the local rebased patch exists
+          if [ ! -f "$QSEECOM_PATCH" ]; then
+            echo "WARNING: Local rebased patch not found at $QSEECOM_PATCH"
+            echo "Falling back to New-Wheat original patch..."
             QSEECOM_PATCH="$PATCH_DIR/huawei_planck_qseecom.patch"
           fi
-          QSEECOM_APPLIED=false
 
           # Try git am first
           if git am --whitespace=nowarn "$QSEECOM_PATCH" 2>/dev/null; then
