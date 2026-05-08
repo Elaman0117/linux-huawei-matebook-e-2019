@@ -488,11 +488,18 @@ jobs:
             echo "=========================================="
             echo "BUILD FAILED — Extracting error details"
             echo "=========================================="
-            # Extract actual error lines (not the parallel noise)
-            grep -E '(error:|Error:|fatal error:|WARNING:.*modpost|multiple definition)' /tmp/kernel-build.log | head -50 || true
             echo ""
-            echo "=== Last 80 lines of build log ==="
-            tail -80 /tmp/kernel-build.log
+            echo "=== Compilation errors ==="
+            grep -E '(error:|Error:|fatal error:)' /tmp/kernel-build.log | grep -v 'scripts/kconfig' | head -80 || true
+            echo ""
+            echo "=== Linker / multiple definition errors ==="
+            grep -E '(multiple definition|undefined reference)' /tmp/kernel-build.log | head -30 || true
+            echo ""
+            echo "=== QSEECOM/SCM related errors ==="
+            grep -E '(qseecom|qcom_scm|uefisecapp)' /tmp/kernel-build.log | grep -iE '(error|warn|note)' | head -30 || true
+            echo ""
+            echo "=== Last 100 lines of build log ==="
+            tail -100 /tmp/kernel-build.log
             exit $BUILD_EXIT
           fi
 
@@ -503,6 +510,14 @@ jobs:
           ls -lh arch/arm64/boot/dts/qcom/sdm850-huawei-matebook-e-2019.dtb 2>/dev/null || \
             echo "Warning: DTB not found at expected path, searching..."
             find arch/arm64/boot/dts -name "*matebook*" -o -name "*planck*" 2>/dev/null | head -5
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build-log-${{ github.run_id }}
+          path: /tmp/kernel-build.log
+          retention-days: 7
 
       - name: Install kernel to staging directory
         run: |
