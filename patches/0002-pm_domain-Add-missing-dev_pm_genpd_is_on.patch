@@ -1,0 +1,70 @@
+From: SDM845 Build Fix <noreply@github.com>
+Subject: [PATCH] pm_domain: Add missing dev_pm_genpd_is_on declaration and implementation
+
+The imx_rproc driver calls dev_pm_genpd_is_on() but the function was
+never declared in the header nor implemented in core.c. This causes:
+
+  drivers/remoteproc/imx_rproc.c:853: error: implicit declaration of
+    function 'dev_pm_genpd_is_on'
+
+Add the function: it checks whether the device's PM domain is in the
+GENPD_STATE_ON state, returning true if so, false otherwise (including
+when the device has no PM domain).
+
+Signed-off-by: CI Build Fix <noreply@github.com>
+---
+ drivers/pmdomain/core.c   |   20 ++++++++++++++++++++
+ include/linux/pm_domain.h |    6 ++++++
+ 2 files changed, 26 insertions(+)
+
+--- a/drivers/pmdomain/core.c
++++ b/drivers/pmdomain/core.c
+@@ -770,6 +770,26 @@ EXPORT_SYMBOL_GPL(dev_pm_genpd_rpm_always_on);
+
+ /**
++ * dev_pm_genpd_is_on() - Check if the device's PM domain is powered on.
++ *
++ * @dev: Device whose PM domain state to check.
++ *
++ * Returns true if the device is attached to a genpd and the genpd is
++ * in the ON state, false otherwise.
++ */
++bool dev_pm_genpd_is_on(struct device *dev)
++{
++	struct generic_pm_domain *genpd;
++
++	genpd = dev_to_genpd_safe(dev);
++	if (!genpd)
++		return false;
++
++	return genpd->status == GENPD_STATE_ON;
++}
++EXPORT_SYMBOL_GPL(dev_pm_genpd_is_on);
++
++/**
+  * pm_genpd_inc_rejected() - Adjust the rejected/usage counts for an idle-state.
+  *
+  * @genpd: The PM domain the idle-state belongs to.
+
+--- a/include/linux/pm_domain.h
++++ b/include/linux/pm_domain.h
+@@ -320,6 +320,7 @@ int dev_pm_genpd_set_performance_state(struct device *dev, unsigned int state);
+ int dev_pm_genpd_set_hwmode(struct device *dev, bool enable);
+ bool dev_pm_genpd_get_hwmode(struct device *dev);
+ int dev_pm_genpd_rpm_always_on(struct device *dev, bool on);
++bool dev_pm_genpd_is_on(struct device *dev);
+
+ extern struct dev_power_governor simple_qos_governor;
+ extern struct dev_power_governor pm_domain_always_on_gov;
+@@ -412,6 +413,11 @@ static inline int dev_pm_genpd_rpm_always_on(struct device *dev, bool on)
+ 	return -EOPNOTSUPP;
+ }
+
++static inline bool dev_pm_genpd_is_on(struct device *dev)
++{
++	return false;
++}
++
+ #define simple_qos_governor		(*(struct dev_power_governor *)(NULL))
+ #define pm_domain_always_on_gov		(*(struct dev_power_governor *)(NULL))
+ #endif
