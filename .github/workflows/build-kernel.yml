@@ -154,7 +154,7 @@ jobs:
             python3 \
             curl \
             git \
-            uboot-tools \
+            u-boot-tools \
             device-tree-compiler
 
       # ================================================================
