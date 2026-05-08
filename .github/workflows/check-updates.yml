@@ -1,0 +1,208 @@
+# ============================================================================
+# check-updates.yml — Monitor upstream sources for new stable versions
+# ============================================================================
+# Monitors two upstream sources:
+#   1. SDM845 Mainline Linux tags on GitLab (PRIMARY version source)
+#      → Only tracks STABLE tags (e.g. sdm845-6.18.2-r0)
+#      → Ignores RC tags (e.g. sdm845-7.1-rc1-r0)
+#   2. New-Wheat patches repository on GitHub
+#
+# Arch Linux ARM PKGBUILD is NOT tracked because its kernel version
+# (standard mainline) does NOT correspond to the SDM845 kernel version.
+#
+# State is stored in GitHub Actions Variables (repo-level).
+# Schedule: every 6 hours.
+# ============================================================================
+
+name: Check Updates
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force trigger a build regardless of changes'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      sdm845_changed: ${{ steps.compare.outputs.sdm845_changed }}
+      new_wheat_changed: ${{ steps.compare.outputs.new_wheat_changed }}
+      any_changed: ${{ steps.compare.outputs.any_changed }}
+      sdm845_tag: ${{ steps.sdm845.outputs.latest_stable_tag }}
+      new_wheat_sha: ${{ steps.new_wheat.outputs.latest_sha }}
+
+    steps:
+      # ----------------------------------------------------------------
+      # Step 1: Get latest STABLE SDM845 tag from GitLab
+      # ----------------------------------------------------------------
+      - name: Get latest stable SDM845 tag
+        id: sdm845
+        run: |
+          # Fetch all tags from the SDM845 GitLab repository
+          TAGS_JSON=$(curl -sf \
+            "https://gitlab.com/api/v4/projects/sdm845-mainline%2Flinux/repository/tags?per_page=100&order_by=updated&sort=desc" \
+            2>/dev/null || echo '[]')
+
+          # Extract sdm845-* tag names, filter OUT rc tags, find latest stable
+          LATEST_STABLE_TAG=$(echo "$TAGS_JSON" \
+            | python3 -c "
+          import sys, json, re
+
+          tags = json.load(sys.stdin)
+          sdm_tags = [t['name'] for t in tags if t['name'].startswith('sdm845-')]
+
+          if not sdm_tags:
+              print('ERROR: No sdm845-* tags found', file=sys.stderr)
+              sys.exit(1)
+
+          # Filter out RC tags — only keep stable (no -rc in name)
+          stable_tags = [t for t in sdm_tags if '-rc' not in t]
+
+          if not stable_tags:
+              print('ERROR: No stable sdm845-* tags found (all are RC)', file=sys.stderr)
+              sys.exit(1)
+
+          # Parse version for sorting: sdm845-X.Y.Z-rN
+          def parse_tag(name):
+              m = re.match(r'sdm845-(\d+)\.(\d+)(?:\.(\d+))?(?:-r(\d+))?', name)
+              if not m:
+                  return (0, 0, 0, 0)
+              major = int(m.group(1))
+              minor = int(m.group(2))
+              patch = int(m.group(3)) if m.group(3) else 0
+              rev = int(m.group(4)) if m.group(4) else 0
+              return (major, minor, patch, rev)
+
+          stable_tags.sort(key=parse_tag, reverse=True)
+          print(stable_tags[0])
+          ")
+
+          if [ -z "$LATEST_STABLE_TAG" ] || [[ "$LATEST_STABLE_TAG" == ERROR* ]]; then
+            echo "Failed to get latest stable SDM845 tag" >&2
+            exit 1
+          fi
+
+          echo "latest_stable_tag=$LATEST_STABLE_TAG" >> "$GITHUB_OUTPUT"
+          echo "Latest stable SDM845 tag: $LATEST_STABLE_TAG"
+
+      # ----------------------------------------------------------------
+      # Step 2: Get latest New-Wheat commit
+      # ----------------------------------------------------------------
+      - name: Get latest New-Wheat commit
+        id: new_wheat
+        run: |
+          LATEST_SHA=$(curl -sf \
+            "https://api.github.com/repos/New-Wheat/Linux-for-HUAWEI-MateBook-E-2019/commits/main" \
+            -H "Accept: application/vnd.github+json" \
+            2>/dev/null \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['sha'])" 2>/dev/null || echo "")
+
+          if [ -z "$LATEST_SHA" ]; then
+            echo "Failed to get New-Wheat commit SHA" >&2
+            exit 1
+          fi
+
+          echo "latest_sha=$LATEST_SHA" >> "$GITHUB_OUTPUT"
+          echo "Latest New-Wheat SHA: ${LATEST_SHA::12}"
+
+      # ----------------------------------------------------------------
+      # Step 3: Compare with stored state
+      # ----------------------------------------------------------------
+      - name: Compare with stored state
+        id: compare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          STORED_SDM845="${{ vars.SDM845_TAG }}"
+          STORED_NEW_WHEAT="${{ vars.NEW_WHEAT_SHA }}"
+
+          CURRENT_SDM845="${{ steps.sdm845.outputs.latest_stable_tag }}"
+          CURRENT_NEW_WHEAT="${{ steps.new_wheat.outputs.latest_sha }}"
+
+          SDM845_CHANGED="false"
+          NEW_WHEAT_CHANGED="false"
+
+          if [ "$CURRENT_SDM845" != "$STORED_SDM845" ]; then
+            SDM845_CHANGED="true"
+            echo "SDM845 changed: $STORED_SDM845 -> $CURRENT_SDM845"
+          fi
+
+          if [ "$CURRENT_NEW_WHEAT" != "$STORED_NEW_WHEAT" ]; then
+            NEW_WHEAT_CHANGED="true"
+            echo "New-Wheat changed: ${STORED_NEW_WHEAT::12} -> ${CURRENT_NEW_WHEAT::12}"
+          fi
+
+          ANY_CHANGED="false"
+          if [ "$SDM845_CHANGED" = "true" ] || [ "$NEW_WHEAT_CHANGED" = "true" ]; then
+            ANY_CHANGED="true"
+          fi
+
+          # Force build if requested
+          if [ "${{ github.event.inputs.force_build }}" = "true" ]; then
+            ANY_CHANGED="true"
+            echo "Force build requested"
+          fi
+
+          echo "sdm845_changed=$SDM845_CHANGED" >> "$GITHUB_OUTPUT"
+          echo "new_wheat_changed=$NEW_WHEAT_CHANGED" >> "$GITHUB_OUTPUT"
+          echo "any_changed=$ANY_CHANGED" >> "$GITHUB_OUTPUT"
+
+      # ----------------------------------------------------------------
+      # Step 4: Update stored state and trigger build
+      # ----------------------------------------------------------------
+      - name: Update stored state
+        if: steps.compare.outputs.any_changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+
+          # Update or create GitHub repo variables
+          for VAR_NAME in SDM845_TAG NEW_WHEAT_SHA; do
+            case "$VAR_NAME" in
+              SDM845_TAG)   VALUE="${{ steps.sdm845.outputs.latest_stable_tag }}" ;;
+              NEW_WHEAT_SHA) VALUE="${{ steps.new_wheat.outputs.latest_sha }}" ;;
+            esac
+
+            # Try PATCH first (variable exists), then POST (create new)
+            if ! gh api "repos/$REPO/actions/variables/$VAR_NAME" \
+                -X PATCH -f name="$VAR_NAME" -f value="$VALUE" 2>/dev/null; then
+              gh api "repos/$REPO/actions/variables" \
+                -X POST -f name="$VAR_NAME" -f value="$VALUE" 2>/dev/null || \
+              echo "Warning: Could not update $VAR_NAME"
+            fi
+          done
+
+      - name: Trigger build workflow
+        if: steps.compare.outputs.any_changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          gh workflow run build-kernel.yml \
+            --ref main \
+            -f sdm845_tag="${{ steps.sdm845.outputs.latest_stable_tag }}" \
+            -f new_wheat_sha="${{ steps.new_wheat.outputs.latest_sha }}" \
+            -f sdm845_changed="${{ steps.compare.outputs.sdm845_changed }}" \
+            -f new_wheat_changed="${{ steps.compare.outputs.new_wheat_changed }}"
+          echo "Build workflow triggered!"
+
+      - name: Summary
+        run: |
+          echo "## Update Check Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Source | Current | Previous | Changed |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|---------|----------|---------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SDM845 (stable) | ${{ steps.sdm845.outputs.latest_stable_tag }} | ${{ vars.SDM845_TAG }} | ${{ steps.compare.outputs.sdm845_changed }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| New-Wheat | ${{ steps.new_wheat.outputs.latest_sha }} | ${{ vars.NEW_WHEAT_SHA }} | ${{ steps.compare.outputs.new_wheat_changed }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Build triggered:** ${{ steps.compare.outputs.any_changed }}" >> "$GITHUB_STEP_SUMMARY"
