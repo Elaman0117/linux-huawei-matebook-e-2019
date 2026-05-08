@@ -345,11 +345,32 @@ jobs:
             fi
           fi
 
+          # ── Patch 6: SDM845 kernel build fixes (local) ──
+          # These patches fix build errors in the SDM845 kernel itself
+          # (not related to New-Wheat patches). Patches matching 0*.patch
+          # are applied from the local patches/ directory.
+          LOCAL_FIX_DIR="../patches"
+          for fix_patch in "$LOCAL_FIX_DIR"/0*.patch; do
+            if [ -f "$fix_patch" ]; then
+              FIX_NAME=$(basename "$fix_patch")
+              echo ""
+              echo "=========================================="
+              echo "Applying build fix: $FIX_NAME"
+              echo "=========================================="
+              if patch -p1 --no-backup-if-mismatch -i "$fix_patch" --dry-run 2>&1; then
+                patch -p1 --no-backup-if-mismatch -i "$fix_patch"
+                echo "Applied $FIX_NAME"
+              else
+                echo "SKIP: $FIX_NAME does not apply (may already be fixed in this kernel version)"
+              fi
+            fi
+          done
+
           echo ""
           echo "=========================================="
           echo "Patch Summary"
           echo "=========================================="
-          TOTAL=5
+          TOTAL=6
           echo "Applied: $APPLIED_COUNT"
           echo "Skipped: $(echo "$SKIPPED_PATCHES" | wc -w) (already merged upstream)"
           echo "Failed:  $(echo "$FAILED_PATCHES" | wc -w)"
