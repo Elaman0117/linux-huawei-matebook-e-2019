@@ -10,6 +10,8 @@
 #   - Handles patch failures gracefully (opens GitHub Issue)
 #   - Aggressive disk cleanup based on GeraldOnIT research:
 #     ARM64 runner: ~46GB free → ~55GB after cleanup (+9GB)
+#   - ccache with GitHub Actions Cache for faster rebuilds
+#   - Build log capture with error extraction on failure
 #   - 6-hour timeout with progress reporting
 # ============================================================================
 
@@ -44,6 +46,8 @@ permissions:
 
 env:
   KERNEL_NAME: linux-huawei-matebook-e-2019
+  CCACHE_DIR: /tmp/ccache
+  CCACHE_MAXSIZE: 5G
 
 jobs:
   build:
@@ -155,7 +159,17 @@ jobs:
             curl \
             git \
             u-boot-tools \
-            device-tree-compiler
+            device-tree-compiler \
+            ccache
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ccache
+          key: ccache-kernel-${{ inputs.sdm845_tag }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-kernel-${{ inputs.sdm845_tag }}-
+            ccache-kernel-
 
       # ================================================================
       # Phase 1: Source Acquisition
@@ -275,18 +289,16 @@ jobs:
             fi
           fi
 
-          # ── Patch 4: QSEECOM ──
+          # ── Patch 4: QSEECOM (local rebased) ──
           # Use the LOCAL rebased patch from this repo's patches/ directory.
           # The original New-Wheat patch doesn't apply cleanly to sdm845-6.18.2-r0
           # because the upstream QSEECOM allowlist and SCM init code have changed.
-          # The rebased patch accounts for these upstream changes.
           echo ""
           echo "=========================================="
           echo "Applying: huawei_planck_qseecom.patch (local rebased)"
           echo "=========================================="
           LOCAL_PATCHES_DIR="../patches"
           QSEECOM_PATCH="$LOCAL_PATCHES_DIR/huawei_planck_qseecom.patch"
-          QSEECOM_APPLIED=false
 
           # Verify the local rebased patch exists
           if [ ! -f "$QSEECOM_PATCH" ]; then
@@ -295,55 +307,18 @@ jobs:
             QSEECOM_PATCH="$PATCH_DIR/huawei_planck_qseecom.patch"
           fi
 
-          # Try git am first
           if git am --whitespace=nowarn "$QSEECOM_PATCH" 2>/dev/null; then
             echo "Applied via git am"
             APPLIED_COUNT=$((APPLIED_COUNT + 1))
-            QSEECOM_APPLIED=true
           else
             git am --abort 2>/dev/null || true
-
-            # Fallback: patch with fuzz and partial apply
-            # --fuzz=3 allows more context mismatch
-            # Apply each hunk individually, skip already-applied ones
-            PATCH_RESULT=0
-            patch -p1 --fuzz=3 --no-backup-if-mismatch -i "$QSEECOM_PATCH" 2>&1 || PATCH_RESULT=$?
-
-            if [ $PATCH_RESULT -eq 0 ]; then
-              echo "Applied via patch -p1 with fuzz"
+            if patch -p1 --no-backup-if-mismatch -i "$QSEECOM_PATCH" --dry-run 2>&1; then
+              patch -p1 --no-backup-if-mismatch -i "$QSEECOM_PATCH"
+              echo "Applied via patch -p1"
               APPLIED_COUNT=$((APPLIED_COUNT + 1))
-              QSEECOM_APPLIED=true
             else
-              # Check if critical parts were applied
-              # The most critical change is adding huawei,planck to the allowlist
-              if grep -q "huawei,planck" drivers/firmware/qcom/qcom_scm.c 2>/dev/null; then
-                echo "PARTIAL: QSEECOM patch partially applied (huawei,planck in allowlist)"
-                echo "Some hunks may have been skipped — checking critical changes..."
-                # Verify other critical parts
-                echo "Checking critical QSEECOM changes..."
-                for pair in \
-                  "platform_data:drivers/firmware/qcom/qcom_qseecom.c" \
-                  "qcom_efivars_ro_ops:drivers/firmware/qcom/qcom_qseecom_uefisecapp.c" \
-                  "QCOM_QSEECOM_QUIRK:include/linux/firmware/qcom/qcom_qseecom.h"; do
-                  keyword="${pair%%:*}"
-                  file="${pair#*:}"
-                  if grep -q "$keyword" "$file" 2>/dev/null; then
-                    echo "  [OK] $file: $keyword found"
-                  else
-                    echo "  [MISSING] $file: $keyword not found"
-                  fi
-                done
-                # Clean up any .rej files
-                find . -name "*.rej" -delete 2>/dev/null
-                APPLIED_COUNT=$((APPLIED_COUNT + 1))
-                QSEECOM_APPLIED=true
-              else
-                echo "FAILED: QSEECOM patch could not be applied"
-                echo "Cleaning up rejected hunks..."
-                find . -name "*.rej" -delete 2>/dev/null
-                find . -name "*.orig" -delete 2>/dev/null
-                FAILED_PATCHES="$FAILED_PATCHES huawei_planck_qseecom.patch (apply failed)"
-              fi
+              echo "FAILED: Could not apply huawei_planck_qseecom.patch"
+              FAILED_PATCHES="$FAILED_PATCHES huawei_planck_qseecom.patch (apply failed)"
             fi
           fi
 
@@ -453,88 +428,88 @@ jobs:
 
           # Apply custom config fragment for MateBook E 2019
           cat >> .config << 'CONFIG_FRAG'
-          # HUAWEI MateBook E 2019 (SDM850) specific options
+# HUAWEI MateBook E 2019 (SDM850) specific options
 
-          # Qualcomm SDM845/SDM850 platform
-          CONFIG_ARCH_QCOM=y
-          CONFIG_SOC_QCOM=y
+# Qualcomm SDM845/SDM850 platform
+CONFIG_ARCH_QCOM=y
+CONFIG_SOC_QCOM=y
 
-          # Type-C / USB PD (needed for UCSI, charging)
-          CONFIG_TYPEC=y
-          CONFIG_TYPEC_UCSI=y
-          CONFIG_UCSI_ACK_ECI=y
+# Type-C / USB PD (needed for UCSI, charging)
+CONFIG_TYPEC=y
+CONFIG_TYPEC_UCSI=y
+CONFIG_UCSI_ACK_ECI=y
 
-          # Huawei Planck EC driver
-          CONFIG_HUAWEI_PLANCK_EC=y
+# Huawei Planck EC driver
+CONFIG_HUAWEI_PLANCK_EC=y
 
-          # QSEECOM (needed for sensors via hexagonrpcd)
-          CONFIG_QCOM_QSEECOM=y
-          CONFIG_QCOM_QSEECOM_UEFI=y
+# QSEECOM (needed for sensors via hexagonrpcd)
+CONFIG_QCOM_QSEECOM=y
+CONFIG_QCOM_QSEECOM_UEFI=y
 
-          # Keyboard / Touchpad (HID over I2C)
-          CONFIG_HID=y
-          CONFIG_HID_MULTITOUCH=y
-          CONFIG_I2C_HID=y
-          CONFIG_I2C_HID_OF=y
+# Keyboard / Touchpad (HID over I2C)
+CONFIG_HID=y
+CONFIG_HID_MULTITOUCH=y
+CONFIG_I2C_HID=y
+CONFIG_I2C_HID_OF=y
 
-          # Touchscreen
-          CONFIG_INPUT_TOUCHSCREEN=y
-          CONFIG_TOUCHSCREEN_GOODIX=y
+# Touchscreen
+CONFIG_INPUT_TOUCHSCREEN=y
+CONFIG_TOUCHSCREEN_GOODIX=y
 
-          # WiFi (ath10k on SDM845)
-          CONFIG_ATH10K=y
-          CONFIG_ATH10K_PCI=y
-          CONFIG_ATH10K_SNOC=y
+# WiFi (ath10k on SDM845)
+CONFIG_ATH10K=y
+CONFIG_ATH10K_PCI=y
+CONFIG_ATH10K_SNOC=y
 
-          # Bluetooth
-          CONFIG_BT=y
-          CONFIG_BT_HCIUART=y
-          CONFIG_BT_HCIUART_QCA=y
+# Bluetooth
+CONFIG_BT=y
+CONFIG_BT_HCIUART=y
+CONFIG_BT_HCIUART_QCA=y
 
-          # GPU (freedreno / msm)
-          CONFIG_DRM_MSM=y
-          CONFIG_DRM_PANEL_EDP=y
+# GPU (freedreno / msm)
+CONFIG_DRM_MSM=y
+CONFIG_DRM_PANEL_EDP=y
 
-          # Audio (qcom/sdm845)
-          CONFIG_SND_SOC=y
-          CONFIG_SND_SOC_QCOM=y
-          CONFIG_SND_SOC_SDM845=y
+# Audio (qcom/sdm845)
+CONFIG_SND_SOC=y
+CONFIG_SND_SOC_QCOM=y
+CONFIG_SND_SOC_SDM845=y
 
-          # UFS storage
-          CONFIG_SCSI_UFS_QCOM=y
+# UFS storage
+CONFIG_SCSI_UFS_QCOM=y
 
-          # Display panels
-          CONFIG_DRM_PANEL=y
+# Display panels
+CONFIG_DRM_PANEL=y
 
-          # Camera (from New-Wheat patches)
-          CONFIG_MEDIA_SUPPORT=y
-          CONFIG_MEDIA_CAMERA_SUPPORT=y
-          CONFIG_V4L_PLATFORM_DRIVERS=y
-          CONFIG_VIDEO_QCOM_CAMSS=y
+# Camera (from New-Wheat patches)
+CONFIG_MEDIA_SUPPORT=y
+CONFIG_MEDIA_CAMERA_SUPPORT=y
+CONFIG_V4L_PLATFORM_DRIVERS=y
+CONFIG_VIDEO_QCOM_CAMSS=y
 
-          # Battery / Power
-          CONFIG_CHARGER_QCOM_SMBB=y
-          CONFIG_POWER_SUPPLY=y
-          CONFIG_BATTERY_QCOM_BATTMGR=y
+# Battery / Power
+CONFIG_CHARGER_QCOM_SMBB=y
+CONFIG_POWER_SUPPLY=y
+CONFIG_BATTERY_QCOM_BATTMGR=y
 
-          # Firmware loader
-          CONFIG_FW_LOADER=y
-          CONFIG_EXTRA_FIRMWARE_DIR="/lib/firmware"
+# Firmware loader
+CONFIG_FW_LOADER=y
+CONFIG_EXTRA_FIRMWARE_DIR="/lib/firmware"
 
-          # initramfs / initrd support
-          CONFIG_BLK_DEV_INITRD=y
+# initramfs / initrd support
+CONFIG_BLK_DEV_INITRD=y
 
-          # Module signing (allow unsigned modules for now)
-          CONFIG_MODULE_SIG=y
-          CONFIG_MODULE_SIG_ALL=n
-          CONFIG_MODULE_SIG_FORCE=n
-          CONFIG_MODULE_SIG_HASH="sha256"
+# Module signing (allow unsigned modules for now)
+CONFIG_MODULE_SIG=y
+CONFIG_MODULE_SIG_ALL=n
+CONFIG_MODULE_SIG_FORCE=n
+CONFIG_MODULE_SIG_HASH="sha256"
 
-          # Module support
-          CONFIG_MODULES=y
-          CONFIG_MODULE_UNLOAD=y
-          CONFIG_MODVERSIONS=y
-          CONFIG_FRAG
+# Module support
+CONFIG_MODULES=y
+CONFIG_MODULE_UNLOAD=y
+CONFIG_MODVERSIONS=y
+CONFIG_FRAG
 
           # Resolve all config dependencies
           make ARCH=arm64 olddefconfig
@@ -549,7 +524,7 @@ jobs:
           done
 
       # ================================================================
-      # Phase 4: Kernel Build
+      # Phase 4: Kernel Build (with ccache + error capture)
       # ================================================================
       - name: Build kernel
         run: |
@@ -560,15 +535,43 @@ jobs:
           echo "Disk space:"
           df -h / .
 
+          # Initialize ccache
+          export CCACHE_DIR=/tmp/ccache
+          ccache -z  # Zero statistics
+          ccache -M 5G  # Set max size
+
           # Build the kernel image, modules, and device tree blobs
+          # Capture output to log file; on failure, extract errors
           make ARCH=arm64 \
             -j$(nproc) \
+            CC="ccache gcc" \
             LOCALVERSION="-huawei-matebook-e-2019" \
             Image.gz \
             modules \
-            qcom/sdm850-huawei-matebook-e-2019.dtb
+            qcom/sdm850-huawei-matebook-e-2019.dtb \
+            2>&1 | tee /tmp/kernel-build.log
+
+          BUILD_EXIT=${PIPESTATUS[0]}
+
+          # Show ccache statistics
+          echo ""
+          echo "=== ccache statistics ==="
+          ccache -s
 
           echo "Kernel build completed at $(date)"
+
+          if [ $BUILD_EXIT -ne 0 ]; then
+            echo ""
+            echo "=========================================="
+            echo "BUILD FAILED — Extracting error details"
+            echo "=========================================="
+            # Extract actual error lines (not the parallel noise)
+            grep -E '(error:|Error:|fatal error:|WARNING:.*modpost|multiple definition)' /tmp/kernel-build.log | head -50 || true
+            echo ""
+            echo "=== Last 80 lines of build log ==="
+            tail -80 /tmp/kernel-build.log
+            exit $BUILD_EXIT
+          fi
 
           # Verify outputs
           echo ""
@@ -628,6 +631,9 @@ jobs:
           rm -rf linux-src
           rm -rf new-wheat
 
+          # Trim ccache to save space (keep metadata, remove old files)
+          ccache -c 2>/dev/null || true
+
           echo "Disk space after removing source trees:"
           df -h /
 
@@ -658,83 +664,83 @@ jobs:
           # Create mkinitcpio preset
           mkdir -p "$PKGDIR/pkg/etc/mkinitcpio.d"
           cat > "$PKGDIR/pkg/etc/mkinitcpio.d/$PKGNAME.preset" << PRESET
-          # mkinitcpio preset file for '$PKGNAME'
+# mkinitcpio preset file for '$PKGNAME'
 
-          ALL_config="/etc/mkinitcpio.conf"
-          ALL_kver="$KVER"
+ALL_config="/etc/mkinitcpio.conf"
+ALL_kver="$KVER"
 
-          PRESETS=('default' 'fallback')
+PRESETS=('default' 'fallback')
 
-          default_image="/boot/initramfs-$PKGNAME.img"
-          default_options="-S autodetect"
+default_image="/boot/initramfs-$PKGNAME.img"
+default_options="-S autodetect"
 
-          fallback_image="/boot/initramfs-$PKGNAME-fallback.img"
-          fallback_options="-S autodetect"
-          PRESET
+fallback_image="/boot/initramfs-$PKGNAME-fallback.img"
+fallback_options="-S autodetect"
+PRESET
 
           # Create .INSTALL script
           cat > "$PKGDIR/pkg/.INSTALL" << INSTALL
-          post_install() {
-            echo "Updating initramfs for $PKGNAME..."
-            if command -v mkinitcpio &>/dev/null; then
-              mkinitcpio -p $PKGNAME
-            fi
+post_install() {
+  echo "Updating initramfs for $PKGNAME..."
+  if command -v mkinitcpio &>/dev/null; then
+    mkinitcpio -p $PKGNAME
+  fi
 
-            echo ""
-            echo "=== $PKGNAME installed ==="
-            echo "Kernel: $KVER"
-            echo ""
-            echo "IMPORTANT: Update your bootloader configuration."
-            echo "  vmlinuz:  /boot/vmlinuz-$PKGNAME"
-            echo "  initramfs: /boot/initramfs-$PKGNAME.img"
-            echo "  dtb:      /boot/dtbs/$KVER/qcom/sdm850-huawei-matebook-e-2019.dtb"
-          }
+  echo ""
+  echo "=== $PKGNAME installed ==="
+  echo "Kernel: $KVER"
+  echo ""
+  echo "IMPORTANT: Update your bootloader configuration."
+  echo "  vmlinuz:  /boot/vmlinuz-$PKGNAME"
+  echo "  initramfs: /boot/initramfs-$PKGNAME.img"
+  echo "  dtb:      /boot/dtbs/$KVER/qcom/sdm850-huawei-matebook-e-2019.dtb"
+}
 
-          post_upgrade() {
-            post_install
-          }
+post_upgrade() {
+  post_install
+}
 
-          pre_remove() {
-            rm -f /boot/initramfs-$PKGNAME.img
-            rm -f /boot/initramfs-$PKGNAME-fallback.img
-          }
-          INSTALL
+pre_remove() {
+  rm -f /boot/initramfs-$PKGNAME.img
+  rm -f /boot/initramfs-$PKGNAME-fallback.img
+}
+INSTALL
 
           # Create .PKGINFO metadata
           cat > "$PKGDIR/pkg/.PKGINFO" << PKGINFO
-          # Generated by GitHub Actions CI
-          pkgname = $PKGNAME
-          pkgver = $PKGVER-$PKGREL
-          pkgdesc = Linux kernel for HUAWEI MateBook E 2019 (SDM850/SDM845) based on SDM845 mainline
-          url = https://github.com/${{ github.repository }}
-          builddate = $(date +%s)
-          packager = GitHub Actions CI <noreply@github.com>
-          size = $(du -sb "$PKGDIR/pkg" | cut -f1)
-          arch = aarch64
-          license = GPL-2.0-only
-          depends = coreutils kmod initramfs
-          optdepends = uboot-tools: for U-Boot bootloader
-          provides = linux=$PKGVER
-          conflicts = linux-aarch64
-          backup = etc/mkinitcpio.d/$PKGNAME.preset
-          PKGINFO
+# Generated by GitHub Actions CI
+pkgname = $PKGNAME
+pkgver = $PKGVER-$PKGREL
+pkgdesc = Linux kernel for HUAWEI MateBook E 2019 (SDM850/SDM845) based on SDM845 mainline
+url = https://github.com/${{ github.repository }}
+builddate = $(date +%s)
+packager = GitHub Actions CI <noreply@github.com>
+size = $(du -sb "$PKGDIR/pkg" | cut -f1)
+arch = aarch64
+license = GPL-2.0-only
+depends = coreutils kmod initramfs
+optdepends = uboot-tools: for U-Boot bootloader
+provides = linux=$PKGVER
+conflicts = linux-aarch64
+backup = etc/mkinitcpio.d/$PKGNAME.preset
+PKGINFO
 
           # Create .BUILDINFO
           cat > "$PKGDIR/pkg/.BUILDINFO" << BUILDINFO
-          # Generated by GitHub Actions CI
-          format = 2
-          pkgname = $PKGNAME
-          pkgbase = $PKGNAME
-          pkgver = $PKGVER-$PKGREL
-          pkgarch = aarch64
-          pkgbuild_sha256sum = unknown
-          packager = GitHub Actions CI <noreply@github.com>
-          builddate = $(date +%s)
-          builddir = /home/runner/work/kernel-build/linux-src
-          buildenv = ci
-          options = !strip
-          buildtool = make
-          BUILDINFO
+# Generated by GitHub Actions CI
+format = 2
+pkgname = $PKGNAME
+pkgbase = $PKGNAME
+pkgver = $PKGVER-$PKGREL
+pkgarch = aarch64
+pkgbuild_sha256sum = unknown
+packager = GitHub Actions CI <noreply@github.com>
+builddate = $(date +%s)
+builddir = /home/runner/work/kernel-build/linux-src
+buildenv = ci
+options = !strip
+buildtool = make
+BUILDINFO
 
           # Generate .MTREE
           cd "$PKGDIR/pkg"
@@ -841,3 +847,11 @@ jobs:
           echo "| Kernel Version | ${{ env.KVER }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| SDM845 Tag | ${{ inputs.sdm845_tag }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| New-Wheat SHA | ${{ inputs.new_wheat_sha }} |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save ccache on success
+        if: success()
+        run: |
+          export CCACHE_DIR=/tmp/ccache
+          ccache -c 2>/dev/null || true
+          echo "ccache stats:"
+          ccache -s
