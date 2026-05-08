@@ -26,27 +26,27 @@ Signed-off-by: Rebased for sdm845-6.18.2-r0
 ---
  arch/arm64/boot/dts/qcom/pm8998.dtsi           |  2 +-
  drivers/firmware/efi/vars.c                     |  2 ++
- drivers/firmware/qcom/qcom_qseecom.c            |  7 ++++-
- drivers/firmware/qcom/qcom_qseecom_uefisecapp.c | 15 ++++++++-
- drivers/firmware/qcom/qcom_scm.c                | 51 +++++++++++++++---------
- include/linux/firmware/qcom/qcom_qseecom.h      |  3 ++
- 6 files changed, 59 insertions(+), 21 deletions(-)
+ drivers/firmware/qcom/qcom_qseecom.c            |  6 +++-
+ drivers/firmware/qcom/qcom_qseecom_uefisecapp.c | 20 +++++++-
+ drivers/firmware/qcom/qcom_scm.c                | 56 +++++++++++++-----------
+ include/linux/firmware/qcom/qcom_qseecom.h      |  5 ++
+ 6 files changed, 63 insertions(+), 28 deletions(-)
 
 diff --git a/arch/arm64/boot/dts/qcom/pm8998.dtsi b/arch/arm64/boot/dts/qcom/pm8998.dtsi
-index 3ecb330590e5..50b41942b06c 100644
+index 3ecb33059..50b41942b 100644
 --- a/arch/arm64/boot/dts/qcom/pm8998.dtsi
 +++ b/arch/arm64/boot/dts/qcom/pm8998.dtsi
 @@ -101,7 +101,7 @@ pm8998_adc_tm: adc-tm@3400 {
  			status = "disabled";
  		};
-
+ 
 -		rtc@6000 {
 +		pm8998_rtc: rtc@6000 {
  			compatible = "qcom,pm8941-rtc";
  			reg = <0x6000>, <0x6100>;
  			reg-names = "rtc", "alarm";
 diff --git a/drivers/firmware/efi/vars.c b/drivers/firmware/efi/vars.c
-index 3700e9869767..11c5f785c093 100644
+index 3700e9869..11c5f785c 100644
 --- a/drivers/firmware/efi/vars.c
 +++ b/drivers/firmware/efi/vars.c
 @@ -227,6 +227,8 @@ efi_status_t efivar_set_variable_locked(efi_char16_t *name, efi_guid_t *vendor,
@@ -55,53 +55,53 @@ index 3700e9869767..11c5f785c093 100644
  		 setvar = __efivars->ops->set_variable;
 +	if (!setvar)
 +		return EFI_WRITE_PROTECTED;
-
+ 
  	return setvar(name, vendor, attr, data_size, data);
  }
 diff --git a/drivers/firmware/qcom/qcom_qseecom.c b/drivers/firmware/qcom/qcom_qseecom.c
-index 731e6d5719f9..aab0d61f0420 100644
+index 731e6d571..d3220f743 100644
 --- a/drivers/firmware/qcom/qcom_qseecom.c
 +++ b/drivers/firmware/qcom/qcom_qseecom.c
 @@ -36,6 +36,7 @@ static void qseecom_client_remove(void *data)
  }
-
+ 
  static int qseecom_client_register(struct platform_device *qseecom_dev,
 +				   void *data,
  				   const struct qseecom_app_desc *desc)
  {
  	struct qseecom_client *client;
 @@ -56,6 +57,7 @@ static int qseecom_client_register(struct platform_device *qseecom_dev,
-
+ 
  	client->aux_dev.name = desc->dev_name;
  	client->aux_dev.dev.parent = &qseecom_dev->dev;
 +	client->aux_dev.dev.platform_data = data;
  	client->aux_dev.dev.release = qseecom_client_release;
  	client->app_id = app_id;
-
+ 
 @@ -89,12 +91,14 @@ static const struct qseecom_app_desc qcom_qseecom_apps[] = {
-
+ 
  static int qcom_qseecom_probe(struct platform_device *qseecom_dev)
  {
 +	void *data = dev_get_platdata(&qseecom_dev->dev);
  	int ret;
  	int i;
-
+ 
  	/* Set up client devices for each base application */
  	for (i = 0; i < ARRAY_SIZE(qcom_qseecom_apps); i++) {
 -		ret = qseecom_client_register(qseecom_dev, &qcom_qseecom_apps[i]);
-+		ret = qseecom_client_register(qseecom_dev, data,
-+					      &qcom_qseecom_apps[i]);
++		qseecom_client_register(qseecom_dev, data,
++						     &qcom_qseecom_apps[i]);
  		if (ret)
  			return ret;
  	}
 diff --git a/drivers/firmware/qcom/qcom_qseecom_uefisecapp.c b/drivers/firmware/qcom/qcom_qseecom_uefisecapp.c
-index 98a463e9774b..05f700dcb8cf 100644
+index 98a463e97..36479907c 100644
 --- a/drivers/firmware/qcom/qcom_qseecom_uefisecapp.c
 +++ b/drivers/firmware/qcom/qcom_qseecom_uefisecapp.c
 @@ -792,6 +792,12 @@ static efi_status_t qcuefi_query_variable_info(u32 attr, u64 *storage_space, u64
  	return status;
  }
-
+ 
 +static const struct efivar_operations qcom_efivars_ro_ops = {
 +	.get_variable = qcuefi_get_variable,
 +	.get_next_variable = qcuefi_get_next_variable,
@@ -111,20 +111,22 @@ index 98a463e9774b..05f700dcb8cf 100644
  static const struct efivar_operations qcom_efivar_ops = {
  	.get_variable = qcuefi_get_variable,
  	.set_variable = qcuefi_set_variable,
-@@ -804,7 +810,9 @@ static const struct efivar_operations qcom_efivar_ops = {
+@@ -804,9 +810,9 @@ static const struct efivar_operations qcom_efivar_ops = {
  static int qcom_uefisecapp_probe(struct auxiliary_device *aux_dev,
  				 const struct auxiliary_device_id *aux_dev_id)
  {
 +	unsigned long *quirks = aux_dev->dev.platform_data;
  	struct qcom_tzmem_pool_config pool_config;
+-	struct qcuefi_client *qcuefi;
+-	int status;
 +	const struct efivar_operations *ops;
- 	struct qcuefi_client *qcuefi;
- 	int status;
-
-@@ -829,7 +837,15 @@ static int qcom_uefisecapp_probe(struct auxiliary_device *aux_dev,
+ 
+ 	qcuefi = devm_kzalloc(&aux_dev->dev, sizeof(*qcuefi), GFP_KERNEL);
+ 	if (!qcuefi)
+@@ -829,7 +835,15 @@ static int qcom_uefisecapp_probe(struct auxiliary_device *aux_dev,
  	if (status)
  		return status;
-
+ 
 -	status = efivars_register(&qcuefi->efivars, &qcom_efivar_ops);
 +	if (quirks &&
 +	    *quirks & QCOM_QSEECOM_QUIRK_RO_UEFIVARS) {
@@ -137,9 +139,9 @@ index 98a463e9774b..05f700dcb8cf 100644
 +	status = efivars_register(&qcuefi->efivars, ops);
  	if (status)
  		qcuefi_set_reference(NULL);
-
+ 
 diff --git a/drivers/firmware/qcom/qcom_scm.c b/drivers/firmware/qcom/qcom_scm.c
-index 26cd0458aacd..2e55738d55c2 100644
+index e777b7cb9..6cac43d8b 100644
 --- a/drivers/firmware/qcom/qcom_scm.c
 +++ b/drivers/firmware/qcom/qcom_scm.c
 @@ -13,6 +13,7 @@
@@ -150,10 +152,11 @@ index 26cd0458aacd..2e55738d55c2 100644
  #include <linux/firmware/qcom/qcom_scm.h>
  #include <linux/firmware/qcom/qcom_tzmem.h>
  #include <linux/init.h>
-@@ -1986,38 +1987,53 @@ int qcom_scm_qseecom_app_send(u32 app_id, void *req, size_t req_size,
+@@ -1986,42 +1987,54 @@ int qcom_scm_qseecom_app_send(u32 app_id, void *req, size_t req_size,
  }
  EXPORT_SYMBOL_GPL(qcom_scm_qseecom_app_send);
-
+ 
++/*
 +static unsigned long qcom_qseecom_disable = QCOM_QSEECOM_QUIRK_DISABLE;
 +static unsigned long qcom_qseecom_ro_uefi = QCOM_QSEECOM_QUIRK_RO_UEFIVARS;
 +
@@ -205,10 +208,10 @@ index 26cd0458aacd..2e55738d55c2 100644
 +	{ .compatible = "qcom,x1p42100", },
  	{ }
  };
-
+ 
 -static bool qcom_scm_qseecom_machine_is_allowed(void)
 +static bool qcom_scm_qseecom_machine_is_allowed(struct device *scm_dev,
-+						unsigned long *quirks)
++						 unsigned long *quirks)
  {
 +	const struct of_device_id *match;
  	struct device_node *np;
@@ -228,13 +231,13 @@ index 26cd0458aacd..2e55738d55c2 100644
 +	} else if (strcmp(qseecom, "auto")) {
 +		dev_warn(scm_dev, "qseecom: invalid value for the modparam, ignoring\n");
 +	}
-
+ 
  	np = of_find_node_by_path("/");
  	if (!np)
-@@ -2026,7 +2042,22 @@ static bool qcom_scm_qseecom_machine_is_allowed(void)
+@@ -2030,7 +2043,22 @@ static bool qcom_scm_qseecom_machine_is_allowed(void)
  	match = of_match_node(qcom_scm_qseecom_allowlist, np);
  	of_node_put(np);
-
+ 
 -	return match;
 +	if (!match) {
 +		dev_info(scm_dev, "qseecom: untested machine, skipping\n");
@@ -253,26 +256,26 @@ index 26cd0458aacd..2e55738d55c2 100644
 +
 +	return true;
  }
-
+ 
  static void qcom_scm_qseecom_free(void *data)
-@@ -2040,6 +2071,7 @@ static void qcom_scm_qseecom_free(void *data)
+@@ -2044,6 +2072,7 @@ static void qcom_scm_qseecom_free(void *data)
  static int qcom_scm_qseecom_init(struct qcom_scm *scm)
  {
  	struct platform_device *qseecom_dev;
 +	unsigned long quirks;
  	u32 version;
  	int ret;
-
-@@ -2060,26 +2092,18 @@ static int qcom_scm_qseecom_init(struct qcom_scm *scm)
-
+ 
+@@ -2064,30 +2093,21 @@ static int qcom_scm_qseecom_init(struct qcom_scm *scm)
+ 
  	dev_info(scm->dev, "qseecom: found qseecom with version 0x%x\n", version);
-
+ 
 -	if (!qcom_scm_qseecom_machine_is_allowed()) {
 -		dev_info(scm->dev, "qseecom: untested machine, skipping\n");
 +	if (!qcom_scm_qseecom_machine_is_allowed(scm->dev, &quirks))
  		return 0;
 -	}
-
+ 
  	/*
  	 * Set up QSEECOM interface device. All application clients will be
  	 * set up and managed by the corresponding driver for it.
@@ -293,17 +296,30 @@ index 26cd0458aacd..2e55738d55c2 100644
 +						    &quirks, sizeof(quirks));
 +	if (IS_ERR(qseecom_dev))
 +		return PTR_ERR(qseecom_dev);
-
+ 
  	return devm_add_action_or_reset(scm->dev, qcom_scm_qseecom_free, qseecom_dev);
  }
+-
+ #else /* CONFIG_QCOM_QSEECOM */
+ 
+ static int qcom_scm_qseecom_init(struct qcom_scm *scm)
 diff --git a/include/linux/firmware/qcom/qcom_qseecom.h b/include/linux/firmware/qcom/qcom_qseecom.h
-index 3387897bf368..d48044ece20c 100644
+index 3387897bf..c8c2f89d9 100644
 --- a/include/linux/firmware/qcom/qcom_qseecom.h
 +++ b/include/linux/firmware/qcom/qcom_qseecom.h
-@@ -51,4 +51,7 @@ static inline int qcom_qseecom_app_send(struct qseecom_client *client,
- 	return qcom_scm_qseecom_app_send(client->app_id, req, rsp, rsp_size);
+@@ -10,6 +10,7 @@
+ #define __QCOM_QSEECOM_H
+ 
+ #include <linux/auxiliary_bus.h>
++#include <linux/bits.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/types.h>
+ 
+@@ -51,4 +52,8 @@ static inline int qcom_qseecom_app_send(struct qseecom_client *client,
+ 	return qcom_scm_qseecom_app_send(client->app_id, req, req_size, rsp, rsp_size);
  }
-
+ 
++
 +#define QCOM_QSEECOM_QUIRK_RO_UEFIVARS		BIT(0)
 +#define QCOM_QSEECOM_QUIRK_DISABLE		BIT(1)
 +
