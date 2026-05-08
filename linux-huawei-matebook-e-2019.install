@@ -1,0 +1,50 @@
+# Post-install/pre-remove script for linux-huawei-matebook-e-2019
+# ============================================================================
+
+post_install() {
+  echo ""
+  echo "=== linux-huawei-matebook-e-2019 installed ==="
+  echo ""
+  echo "Updating initramfs..."
+  if command -v mkinitcpio &>/dev/null; then
+    mkinitcpio -p linux-huawei-matebook-e-2019
+  else
+    echo "Warning: mkinitcpio not found. Please generate initramfs manually."
+  fi
+
+  echo ""
+  echo "IMPORTANT: Update your bootloader configuration to use:"
+  echo "  Kernel:    /boot/vmlinuz-linux-huawei-matebook-e-2019"
+  echo "  Initramfs: /boot/initramfs-linux-huawei-matebook-e-2019.img"
+  echo "  DTB:       /boot/dtbs/*/qcom/sdm850-huawei-matebook-e-2019.dtb"
+  echo ""
+  echo "For GRUB:"
+  echo "  grub-mkconfig -o /boot/grub/grub.cfg"
+  echo ""
+  echo "Required firmware packages:"
+  echo "  pacman -S linux-firmware"
+  echo ""
+  echo "For sensor support (accelerometer, ambient light):"
+  echo "  Install libssc and hexagonrpcd from AUR"
+}
+
+post_upgrade() {
+  echo ""
+  echo "=== linux-huawei-matebook-e-2019 upgraded ==="
+  echo ""
+  echo "Updating initramfs..."
+  if command -v mkinitcpio &>/dev/null; then
+    mkinitcpio -p linux-huawei-matebook-e-2019
+  fi
+
+  echo ""
+  echo "IMPORTANT: Update your bootloader configuration!"
+  echo "  GRUB: grub-mkconfig -o /boot/grub/grub.cfg"
+}
+
+post_remove() {
+  echo "Removing initramfs images..."
+  rm -f /boot/initramfs-linux-huawei-matebook-e-2019.img
+  rm -f /boot/initramfs-linux-huawei-matebook-e-2019-fallback.img
+  echo "Kernel package removed. Update your bootloader configuration."
+}
