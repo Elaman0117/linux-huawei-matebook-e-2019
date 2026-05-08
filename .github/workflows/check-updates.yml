@@ -175,9 +175,9 @@ jobs:
 
             # Try PATCH first (variable exists), then POST (create new)
             if ! gh api "repos/$REPO/actions/variables/$VAR_NAME" \
-                -X PATCH -f name="$VAR_NAME" -f value="$VALUE" 2>/dev/null; then
+                -X PATCH -f name="$VAR_NAME" -f value="$VALUE" --repo "$REPO" 2>/dev/null; then
               gh api "repos/$REPO/actions/variables" \
-                -X POST -f name="$VAR_NAME" -f value="$VALUE" 2>/dev/null || \
+                -X POST -f name="$VAR_NAME" -f value="$VALUE" --repo "$REPO" 2>/dev/null || \
               echo "Warning: Could not update $VAR_NAME"
             fi
           done
@@ -189,6 +189,7 @@ jobs:
         run: |
           REPO="${{ github.repository }}"
           gh workflow run build-kernel.yml \
+            --repo "$REPO" \
             --ref main \
             -f sdm845_tag="${{ steps.sdm845.outputs.latest_stable_tag }}" \
             -f new_wheat_sha="${{ steps.new_wheat.outputs.latest_sha }}" \
