@@ -57,6 +57,10 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
 
+    defaults:
+      run:
+        shell: bash -e -o pipefail {0}
+
     steps:
       # ================================================================
       # Phase 0: Environment Preparation & Disk Cleanup
@@ -157,6 +161,7 @@ jobs:
             kmod \
             zstd \
             libarchive-dev \
+            libarchive-tools \
             xz-utils \
             python3 \
             curl \
