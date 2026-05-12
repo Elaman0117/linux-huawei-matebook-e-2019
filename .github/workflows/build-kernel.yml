@@ -437,6 +437,22 @@ jobs:
       # ================================================================
       # Phase 3: Kernel Configuration
       # ================================================================
+
+      # ── Fix 9: Commit patches to avoid "-dirty" kernel version ──
+      # When patches are applied but not committed, the kernel version gets
+      # a "-dirty" suffix (e.g. "6.18.2-huawei-matebook-e-2019-ga49cccfa7c9c-dirty").
+      # This looks unprofessional and can cause issues with module loading.
+      # Committing the patches makes the tree clean and removes the "-dirty" suffix.
+      - name: Commit applied patches (avoid -dirty version)
+        run: |
+          cd linux-src
+          # Add all changes (applied patches) and commit
+          git add -A
+          git commit -m "Apply New-Wheat patches for Huawei MateBook E 2019" --allow-empty
+          echo "Git status after commit:"
+          git describe --always 2>/dev/null || git rev-parse --short HEAD
+          git diff --stat HEAD
+
       - name: Generate kernel config
         run: |
           cd linux-src
@@ -553,6 +569,8 @@ jobs:
           mkdir -p "$STAGING"
 
           # Install modules (stripped)
+          # NOTE: Use INSTALL_MOD_PATH with /usr/lib prefix to match
+          # Arch Linux ARM convention (official linux-aarch64 uses /usr/lib/modules)
           make ARCH=arm64 \
             INSTALL_MOD_PATH="$STAGING" \
             INSTALL_MOD_STRIP=1 \
@@ -563,27 +581,60 @@ jobs:
           echo "Kernel version: $KVER"
           echo "KVER=$KVER" >> "$GITHUB_ENV"
 
+          # ── Fix 1: Move /lib/modules → /usr/lib/modules ──
+          # Arch Linux ARM uses /usr/lib/modules (like the official linux-aarch64 package).
+          # The kernel's makefile installs to /lib/modules by default.
+          # /lib is a symlink to /usr/lib on Arch, but packages should use /usr/lib.
+          if [ -d "$STAGING/lib/modules" ] && [ ! -d "$STAGING/usr/lib/modules" ]; then
+            echo "Moving /lib/modules to /usr/lib/modules to match Arch convention"
+            mkdir -p "$STAGING/usr/lib"
+            mv "$STAGING/lib/modules" "$STAGING/usr/lib/modules"
+            # Remove empty /lib directory
+            rmdir "$STAGING/lib" 2>/dev/null || true
+          fi
+
+          # ── Fix 2: Remove the 'build' and 'source' symlinks ──
+          # These point to the CI build directory and are useless on the target system.
+          # The official linux-aarch64 package does NOT include these symlinks.
+          MODDIR="$STAGING/usr/lib/modules/$KVER"
+          if [ -L "$MODDIR/build" ]; then
+            echo "Removing stale 'build' symlink: $(readlink "$MODDIR/build")"
+            rm -f "$MODDIR/build"
+          fi
+          if [ -L "$MODDIR/source" ]; then
+            echo "Removing stale 'source' symlink: $(readlink "$MODDIR/source")"
+            rm -f "$MODDIR/source"
+          fi
+
           # Install kernel image
           mkdir -p "$STAGING/boot"
           cp arch/arm64/boot/Image.gz "$STAGING/boot/vmlinuz-$KVER"
 
           # Install device tree blob
-          mkdir -p "$STAGING/boot/dtbs/$KVER/qcom"
+          # NOTE: Arch Linux ARM official kernel uses /boot/dtbs/<vendor>/<board>.dtb
+          # (no version subdirectory). We follow the same convention.
+          mkdir -p "$STAGING/boot/dtbs/qcom"
           DTB_PATH="arch/arm64/boot/dts/qcom/sdm850-huawei-matebook-e-2019.dtb"
           if [ -f "$DTB_PATH" ]; then
-            cp "$DTB_PATH" "$STAGING/boot/dtbs/$KVER/qcom/"
+            cp "$DTB_PATH" "$STAGING/boot/dtbs/qcom/"
           else
             echo "Warning: DTB not found at $DTB_PATH"
             find arch/arm64/boot/dts -name "*matebook*" -o -name "*planck*" 2>/dev/null | while read dtb; do
-              cp "$dtb" "$STAGING/boot/dtbs/$KVER/qcom/"
+              cp "$dtb" "$STAGING/boot/dtbs/qcom/"
             done
           fi
+
+          # ── Fix 3: Add /usr/lib/initcpio/<kver> dummy file ──
+          # This is required by Arch Linux to trigger mkinitcpio during package install.
+          # The official linux-aarch64 package includes this file.
+          mkdir -p "$STAGING/usr/lib/initcpio"
+          echo "dummy file to trigger mkinitcpio to run" > "$STAGING/usr/lib/initcpio/$KVER"
 
           echo ""
           echo "=== Staging directory size ==="
           du -sh "$STAGING"
           du -sh "$STAGING/boot"
-          du -sh "$STAGING/lib/modules"
+          du -sh "$STAGING/usr/lib/modules"
 
       # ================================================================
       # Phase 5: Free disk space before packaging
@@ -620,6 +671,13 @@ jobs:
           mkdir -p "$PKGDIR/pkg"
           cp -a "$STAGING/." "$PKGDIR/pkg/"
 
+          # ── Fix 4: Set all file ownership to root:root (0:0) ──
+          # Arch Linux packages must have all files owned by root (uid=0, gid=0).
+          # The official linux-aarch64 package uses uid=0/gid=0 throughout.
+          # Without this, files get installed with wrong ownership (e.g. uid=1001).
+          echo "Setting file ownership to root:root (0:0)"
+          chown -R 0:0 "$PKGDIR/pkg"
+
           # Create /boot/vmlinuz-linux-huawei-matebook-e-2019 symlink
           if [ -f "$PKGDIR/pkg/boot/vmlinuz-$KVER" ]; then
             ln -sf "vmlinuz-$KVER" "$PKGDIR/pkg/boot/vmlinuz-$PKGNAME"
@@ -635,7 +693,18 @@ jobs:
           cp "${{ github.workspace }}/linux-huawei-matebook-e-2019.install" \
             "$PKGDIR/pkg/.INSTALL"
 
-          # Create .PKGINFO metadata
+          # ── Fix 5: Use correct .PKGINFO field names ──
+          # Arch PKGINFO format uses SINGULAR field names:
+          #   depend (not depends), optdepend (not optdepends), conflict (not conflicts)
+          # Each dependency/conflict/optdepend must be on its own line.
+          # Reference: https://archlinux.org/pacman/PKGINFO.5.html
+          #
+          # Also fixed:
+          #   - Added mkinitcpio>=0.7 as dependency (required for initramfs generation)
+          #   - Added linux-firmware and wireless-regdb as optdepends (matches official)
+          #   - Added KSMBD-MODULE and WIREGUARD-MODULE provides (matches official)
+          #   - Added conflict = linux (matches official's conflict declaration)
+          #   - Kept conflict = linux-aarch64 to prevent co-installation
           {
             echo "# Generated by GitHub Actions CI"
             echo "pkgname = $PKGNAME"
@@ -647,14 +716,22 @@ jobs:
             echo "size = $(du -sb "$PKGDIR/pkg" | cut -f1)"
             echo "arch = aarch64"
             echo "license = GPL-2.0-only"
-            echo "depends = coreutils kmod initramfs"
-            echo "optdepends = uboot-tools: for U-Boot bootloader"
+            echo "depend = coreutils"
+            echo "depend = kmod"
+            echo "depend = mkinitcpio>=0.7"
+            echo "optdepend = linux-firmware: firmware images needed for some devices"
+            echo "optdepend = wireless-regdb: to set the correct wireless channels of your country"
+            echo "optdepend = uboot-tools: for U-Boot bootloader"
             echo "provides = linux=$PKGVER"
-            echo "conflicts = linux-aarch64"
+            echo "provides = KSMBD-MODULE"
+            echo "provides = WIREGUARD-MODULE"
+            echo "conflict = linux"
+            echo "conflict = linux-aarch64"
             echo "backup = etc/mkinitcpio.d/$PKGNAME.preset"
           } > "$PKGDIR/pkg/.PKGINFO"
 
-          # Create .BUILDINFO
+          # ── Fix 6: Updated .BUILDINFO ──
+          # Fixed builddir to reflect actual CI path, added missing fields.
           {
             echo "# Generated by GitHub Actions CI"
             echo "format = 2"
@@ -665,29 +742,42 @@ jobs:
             echo "pkgbuild_sha256sum = unknown"
             echo "packager = GitHub Actions CI <noreply@github.com>"
             echo "builddate = $(date +%s)"
-            echo "builddir = /home/runner/work/kernel-build/linux-src"
-            echo "buildenv = ci"
-            echo "options = !strip"
+            echo "builddir = /home/runner/work/linux-huawei-matebook-e-2019/linux-huawei-matebook-e-2019"
+            echo "startdir = /home/runner/work/linux-huawei-matebook-e-2019/linux-huawei-matebook-e-2019"
             echo "buildtool = make"
+            echo "buildenv = ci"
+            echo "options = strip"
+            echo "options = docs"
+            echo "options = !libtool"
+            echo "options = !staticlibs"
+            echo "options = emptydirs"
+            echo "options = zipman"
+            echo "options = purge"
+            echo "options = !debug"
+            echo "options = !lto"
           } > "$PKGDIR/pkg/.BUILDINFO"
 
           # Generate .MTREE
+          # ── Fix 7: Ensure MTREE records root ownership (uid=0, gid=0) ──
           cd "$PKGDIR/pkg"
           bsdtar -czf .MTREE --format=mtree \
             --options='!all,use-set,type,uid,gid,mode,time,size,md5,sha256' \
             . 2>/dev/null || {
+            echo "WARNING: bsdtar MTREE generation failed, using fallback"
             find . -type f | sort | while read f; do
               mode=$(stat -c '%a' "$f" 2>/dev/null || echo '644')
               size=$(stat -c '%s' "$f" 2>/dev/null || echo '0')
               md5=$(md5sum "$f" | cut -d' ' -f1)
-              echo "./${f#./} $mode size=$size md5digest=$md5"
+              echo "./${f#./} $mode uid=0 gid=0 size=$size md5digest=$md5"
             done | gzip > .MTREE
           }
 
           # Create the .pkg.tar.zst package
           cd "$PKGDIR"
           PACKAGE_FILE="${PKGNAME}-${PKGVER}-${PKGREL}-aarch64.pkg.tar.zst"
-          bsdtar -cf - -C pkg . | zstd -T0 -18 -o "$PACKAGE_FILE"
+          # ── Fix 8: Force root ownership in tar archive ──
+          # bsdtar --uid 0 --gid 0 ensures all entries are owned by root.
+          bsdtar --uid 0 --gid 0 -cf - -C pkg . | zstd -T0 -18 -o "$PACKAGE_FILE"
 
           echo "package_file=$PACKAGE_FILE" >> "$GITHUB_OUTPUT"
           echo ""
