@@ -772,7 +772,10 @@ jobs:
                   echo "./${f#./} type=dir mode=$mode uid=0 gid=0"
                 elif [ -L "$f" ]; then
                   mode=$(stat -c '%a' "$f" 2>/dev/null || echo '777')
-                  echo "./${f#./} type=link mode=$mode uid=0 gid=0"
+                  link_target=$(readlink -- "$f" 2>/dev/null || echo '')
+                  link_target=${link_target//\\/\\\\}
+                  link_target=${link_target// /\\040}
+                  echo "./${f#./} type=link mode=$mode uid=0 gid=0 link=$link_target"
                 fi
               done
             } | gzip > .MTREE
