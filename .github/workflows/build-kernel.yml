@@ -610,8 +610,20 @@ jobs:
           mkdir -p "$STAGING/boot"
           # Match Arch Linux ARM linux-aarch64: install both Image and Image.gz
           # so existing bootloader configs keep working after replacing linux-aarch64.
-          install -Dm644 arch/arm64/boot/Image "$STAGING/boot/Image"
-          install -Dm644 arch/arm64/boot/Image.gz "$STAGING/boot/Image.gz"
+          IMAGE_PATH="arch/arm64/boot/Image"
+          IMAGE_GZ_PATH="arch/arm64/boot/Image.gz"
+          if [ ! -f "$IMAGE_PATH" ]; then
+            echo "Error: expected kernel image not found at $IMAGE_PATH"
+            echo "Ensure the kernel build step explicitly produces the Image target."
+            exit 1
+          fi
+          if [ ! -f "$IMAGE_GZ_PATH" ]; then
+            echo "Error: expected compressed kernel image not found at $IMAGE_GZ_PATH"
+            echo "Ensure the kernel build step explicitly produces the Image.gz target."
+            exit 1
+          fi
+          install -Dm644 "$IMAGE_PATH" "$STAGING/boot/Image"
+          install -Dm644 "$IMAGE_GZ_PATH" "$STAGING/boot/Image.gz"
 
           # Install device tree blob
           # NOTE: Arch Linux ARM official kernel uses /boot/dtbs/<vendor>/<board>.dtb
