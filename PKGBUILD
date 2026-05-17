@@ -91,39 +91,50 @@ build() {
   cd "${srcdir}/linux-src"
   make ARCH=arm64 -j"$(nproc)" \
     LOCALVERSION="${_localversion}" \
-    Image.gz modules \
+    Image Image.gz modules \
     qcom/sdm850-huawei-matebook-e-2019.dtb
 }
 
 _package() {
   pkgdesc="The ${_desc} kernel and modules based on SDM845 mainline"
-  depends=('coreutils' 'kmod' 'initramfs')
-  optdepends=('uboot-tools: for U-Boot bootloader')
-  provides=("linux=${pkgver}")
-  conflicts=('linux-aarch64')
+  depends=('coreutils' 'kmod' 'mkinitcpio>=0.7')
+  optdepends=(
+    'linux-firmware: firmware images needed for some devices'
+    'wireless-regdb: to set the correct wireless channels of your country'
+    'uboot-tools: for U-Boot bootloader'
+  )
+  provides=("linux=${pkgver}" 'KSMBD-MODULE' 'WIREGUARD-MODULE')
+  conflicts=('linux' 'linux-aarch64')
   backup=("etc/mkinitcpio.d/${pkgbase}.preset")
   install="${pkgbase}.install"
 
   cd "${srcdir}/linux-src"
   local _kernver="$(make ARCH=arm64 kernelrelease)"
 
-  # Install modules
-  make ARCH=arm64 INSTALL_MOD_PATH="${pkgdir}" INSTALL_MOD_STRIP=1 modules_install
+  # Install modules (Arch Linux ARM convention: /usr/lib/modules)
+  make ARCH=arm64 \
+    INSTALL_MOD_PATH="${pkgdir}/usr" \
+    INSTALL_MOD_STRIP=1 \
+    modules_install
 
-  # Install kernel image
-  install -Dm644 arch/arm64/boot/Image.gz "${pkgdir}/boot/vmlinuz-${pkgbase}"
-  ln -sf "vmlinuz-${pkgbase}" "${pkgdir}/boot/vmlinuz-${_kernver}"
+  # Install boot images (match linux-aarch64 layout)
+  install -Dm644 arch/arm64/boot/Image "${pkgdir}/boot/Image"
+  install -Dm644 arch/arm64/boot/Image.gz "${pkgdir}/boot/Image.gz"
 
   # Install device tree blob
   install -Dm644 arch/arm64/boot/dts/qcom/sdm850-huawei-matebook-e-2019.dtb \
-    "${pkgdir}/boot/dtbs/${_kernver}/qcom/sdm850-huawei-matebook-e-2019.dtb" 2>/dev/null || true
+    "${pkgdir}/boot/dtbs/qcom/sdm850-huawei-matebook-e-2019.dtb" 2>/dev/null || true
+
+  # Trigger mkinitcpio hook on install/upgrade (matches linux-aarch64)
+  install -d "${pkgdir}/usr/lib/initcpio/"
+  echo "dummy file to trigger mkinitcpio to run" > "${pkgdir}/usr/lib/initcpio/${_kernver}"
 
   # Install mkinitcpio preset
   install -Dm644 "${srcdir}/linux.preset" "${pkgdir}/etc/mkinitcpio.d/${pkgbase}.preset"
   sed -i -e "s|%PKGBASE%|${pkgbase}|g" -e "s|%KERNVER%|${_kernver}|g" \
     "${pkgdir}/etc/mkinitcpio.d/${pkgbase}.preset"
 
-  # Remove build and source symlinks
-  rm -f "${pkgdir}/lib/modules/${_kernver}/build"
-  rm -f "${pkgdir}/lib/modules/${_kernver}/source"
+  # Remove build and source symlinks (should not ship in the runtime kernel package)
+  rm -f "${pkgdir}/usr/lib/modules/${_kernver}/build"
+  rm -f "${pkgdir}/usr/lib/modules/${_kernver}/source"
 }
